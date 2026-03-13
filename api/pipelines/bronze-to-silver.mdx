@@ -1,0 +1,363 @@
+---
+title: 'Bronze to Silver Pipeline'
+description: 'Deduplicate and transform raw data from Bronze to Silver layer using Delta Lake'
+icon: 'filter'
+---
+
+## Overview
+
+The Bronze to Silver pipeline deduplicates timestamped data and transforms raw JSON into structured schemas. It reads from the Bronze layer in Delta Lake (MinIO), applies timestamp-based deduplication, parses raw data, generates hash columns for change tracking, and writes to the Silver layer.
+
+## Module Path
+
+```python
+from batch_jobs.pipelines.bronze_silver.minio_to_minio import run_dedup_timestamp
+```
+
+## Purpose
+
+- **Deduplication**: Remove duplicate records based on timestamp within each batch
+- **Schema Parsing**: Convert raw JSON data into structured Spark schemas
+- **Hash Generation**: Create hash columns for tracking changes in arrays (casts, crews) and vector information
+- **Incremental Processing**: Track batch versions in Redis to process only new data
+- **Change Data Capture**: Use Delta Lake CDF (Change Data Feed) to efficiently read incremental changes
+
+## Data Flow
+
+<CardGroup cols={2}>
+  <Card title="Input" icon="database">
+    **Bronze Layer** (Delta Lake on MinIO)
+    - Raw JSON data with timestamps
+    - Movies, TV series, and person data
+    - Uses Delta Lake CDF for incremental reads
+  </Card>
+  <Card title="Output" icon="table">
+    **Silver Layer** (Delta Lake on MinIO)
+    - Deduplicated, structured data
+    - Parsed schemas with hash columns
+    - Diff columns for change tracking
+  </Card>
+</CardGroup>
+
+## Configuration Parameters
+
+The pipeline reads configuration from `settings.yaml`:
+
+<ParamField path="spark.app_name_1" type="string" required>
+  Spark application name for this pipeline
+</ParamField>
+
+<ParamField path="storage.delta_lake.tables.bronze_layer" type="string" required>
+  S3/MinIO path to Bronze layer Delta tables
+</ParamField>
+
+<ParamField path="storage.delta_lake.tables.silver_layer" type="string" required>
+  S3/MinIO path to Silver layer Delta tables
+</ParamField>
+
+<ParamField path="storage.delta_lake.target_name_folder" type="array" required>
+  List of tuples: `[(data_type, folder_name)]`
+  
+  Example: `[("movie", "movie"), ("tv_series", "tv_series"), ("person", "person")]`
+</ParamField>
+
+<ParamField path="storage.redis.keys.dedup_batch_version" type="string" required>
+  Redis key prefix for tracking batch versions
+  
+  Example: `"dedup_batch_version"`
+</ParamField>
+
+## Function Signature
+
+### `run_dedup_timestamp()`
+
+Main entry point for the Bronze to Silver pipeline.
+
+```python
+def run_dedup_timestamp():
+    """
+    Pipeline to dedup timestamp, from bronze to silver layer in Delta Lake Minio
+    """
+```
+
+**Parameters**: None (reads from configuration)
+
+**Returns**: None (writes to Delta Lake)
+
+**Process Flow**:
+1. Load settings from `settings.yaml`
+2. Initialize Redis client for version tracking
+3. Create Spark session with MinIO configuration
+4. For each data type (movie, tv_series, person):
+   - Retrieve last processed version from Redis
+   - Read incremental changes using Delta Lake CDF
+   - Apply timestamp-based deduplication
+   - Parse raw JSON to structured schema
+   - Generate hash columns for change tracking
+   - Upsert to Silver layer Delta table
+   - Update version in Redis
+
+## Supporting Functions
+
+### `upsert_latest()`
+
+Performs the core transformation and upsert logic.
+
+```python
+def upsert_latest(
+    spark: SparkSession,
+    from_df: DataFrame,
+    data_type: str,
+    raw_column: str,
+    data_schema,
+    to_folder: str,
+    key_columns: list[str],
+    ts_column: str
+)
+```
+
+<ParamField path="spark" type="SparkSession" required>
+  Active Spark session
+</ParamField>
+
+<ParamField path="from_df" type="DataFrame" required>
+  Source DataFrame from Bronze layer
+</ParamField>
+
+<ParamField path="data_type" type="string" required>
+  Type of data: `"movie"`, `"tv_series"`, or `"person"`
+</ParamField>
+
+<ParamField path="raw_column" type="string" required>
+  Column name containing raw JSON data (typically `"raw_df"`)
+</ParamField>
+
+<ParamField path="data_schema" type="StructType" required>
+  Spark schema for parsing raw JSON
+</ParamField>
+
+<ParamField path="to_folder" type="string" required>
+  S3/MinIO path for Silver layer output
+</ParamField>
+
+<ParamField path="key_columns" type="list[str]" required>
+  Columns used for deduplication and merge (e.g., `["data_type", "id_of_data_type"]`)
+</ParamField>
+
+<ParamField path="ts_column" type="string" required>
+  Timestamp column for deduplication (e.g., `"timestamp"`)
+</ParamField>
+
+## Usage Example
+
+<CodeGroup>
+```python Direct Execution
+# Run the pipeline directly
+from batch_jobs.pipelines.bronze_silver.minio_to_minio import run_dedup_timestamp
+
+if __name__ == "__main__":
+    run_dedup_timestamp()
+```
+
+```python Airflow DAG
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from batch_jobs.pipelines.bronze_silver.minio_to_minio import run_dedup_timestamp
+from datetime import datetime
+
+with DAG(
+    dag_id='bronze_to_silver_pipeline',
+    start_date=datetime(2024, 1, 1),
+    schedule_interval='@daily',
+    catchup=False
+) as dag:
+    
+    transform_task = PythonOperator(
+        task_id='run_dedup_timestamp',
+        python_callable=run_dedup_timestamp
+    )
+```
+
+```python Custom Spark Job
+from pyspark.sql import SparkSession
+from batch_jobs.tranforms.delta_delta.upsert_latest import upsert_latest
+from batch_jobs.schema.movie_schema import MOVIE_FULL_SCHEMA
+
+# Create Spark session
+spark = SparkSession.builder.appName("CustomBronzeToSilver").getOrCreate()
+
+# Read from Bronze layer
+bronze_df = spark.read.format("delta").load("s3a://bronze/movie")
+
+# Apply transformation
+upsert_latest(
+    spark=spark,
+    from_df=bronze_df,
+    data_type="movie",
+    raw_column="raw_df",
+    data_schema=MOVIE_FULL_SCHEMA,
+    to_folder="s3a://silver/movie",
+    key_columns=["data_type", "id_of_data_type"],
+    ts_column="timestamp"
+)
+```
+</CodeGroup>
+
+## Hash Configurations
+
+The pipeline generates hash columns for change tracking:
+
+### Movie Hash Config
+```python
+{
+    "array": [
+        {"array_col": "parsed_raw_df.casts_info", "prefix_target_column_name": "casts", "id_element_field": "cast_id"},
+        {"array_col": "parsed_raw_df.crews_info", "prefix_target_column_name": "crews", "id_element_field": "person_id"},
+    ],
+    "vector_info_cols": ["parsed_raw_df.movie_detail.overview"],
+    "array_prefix": ["casts", "crews"]
+}
+```
+
+### TV Series Hash Config
+```python
+{
+    "array": [
+        {"array_col": "parsed_raw_df.casts_info", "prefix_target_column_name": "casts", "id_element_field": "cast_id"},
+        {"array_col": "parsed_raw_df.crews_info", "prefix_target_column_name": "crews", "id_element_field": "person_id"},
+    ],
+    "vector_info_cols": ["parsed_raw_df.tv_series_detail.overview"],
+    "array_prefix": ["casts", "crews"]
+}
+```
+
+### Person Hash Config
+```python
+{
+    "array": [],
+    "vector_info_cols": [],
+    "array_prefix": []
+}
+```
+
+## Output Schema
+
+The Silver layer includes these key columns:
+
+<ResponseField name="data_type" type="string">
+  Type of entity: movie, tv_series, or person
+</ResponseField>
+
+<ResponseField name="id_of_data_type" type="long">
+  Unique identifier for the entity
+</ResponseField>
+
+<ResponseField name="parsed_raw_df" type="struct">
+  Structured data parsed from raw JSON
+</ResponseField>
+
+<ResponseField name="batch_version" type="long">
+  Delta Lake version when this record was processed
+</ResponseField>
+
+<ResponseField name="timestamp" type="timestamp">
+  When the record was created/updated
+</ResponseField>
+
+<ResponseField name="casts_total_hash" type="long">
+  Hash of all cast members (for movies/TV series)
+</ResponseField>
+
+<ResponseField name="crews_total_hash" type="long">
+  Hash of all crew members (for movies/TV series)
+</ResponseField>
+
+<ResponseField name="casts_diff" type="struct">
+  Added and removed cast members
+  
+  ```json
+  {
+    "added": [cast_id1, cast_id2, ...],
+    "removed": [cast_id3, cast_id4, ...]
+  }
+  ```
+</ResponseField>
+
+<ResponseField name="crews_diff" type="struct">
+  Added and removed crew members
+  
+  ```json
+  {
+    "added": [person_id1, person_id2, ...],
+    "removed": [person_id3, person_id4, ...]
+  }
+  ```
+</ResponseField>
+
+<ResponseField name="vector_info_hash" type="long">
+  Hash of text fields used for vector embeddings
+</ResponseField>
+
+<ResponseField name="vector_info_hash_diff" type="boolean">
+  Whether vector information changed since last version
+</ResponseField>
+
+## Error Handling
+
+<Warning>
+  If Redis does not contain a version key for a data type, the pipeline will initialize it to 0 and process all data from the beginning.
+</Warning>
+
+```python
+if not last_version:
+    logger.info("No last version found for %s, setting to 0", version_key)
+    redis_client.set(version_key, 0)
+    last_version = 0
+```
+
+<Note>
+  The pipeline uses Delta Lake's merge operation with conditions:
+  - **Update**: When keys match AND source timestamp > target timestamp
+  - **Insert**: When keys don't match (new records)
+</Note>
+
+## Performance Considerations
+
+- **Incremental Processing**: Only reads new Delta Lake versions using CDF
+- **Deduplication**: Window functions partition by key columns for efficient deduplication
+- **Hash-based Change Detection**: Avoids full comparisons by using hash columns
+- **Batch Version Tracking**: Redis stores last processed version to avoid reprocessing
+
+## Dependencies
+
+- **PySpark**: Data processing framework
+- **Delta Lake**: ACID transactions and time travel
+- **Redis**: Version tracking and coordination
+- **MinIO**: S3-compatible object storage
+
+## Logging
+
+The pipeline logs key events:
+
+- Configuration loading
+- Version retrieval from Redis
+- DataFrame sizes before and after deduplication
+- Upsert operations
+- Version updates in Redis
+
+```python
+logger.info("Reading data from %s with version %d to %d", from_path, int(last_version), current_version)
+logger.info("Size before dedup: %s", from_df.count())
+logger.info("Size after dedup: %s", clean_df.count())
+```
+
+## Related Pipelines
+
+<CardGroup cols={2}>
+  <Card title="Silver to ClickHouse" icon="arrow-right" href="/api/pipelines/silver-to-clickhouse">
+    Next pipeline: Transform and load Silver data into ClickHouse
+  </Card>
+  <Card title="ClickHouse to Neo4j" icon="arrow-right" href="/api/pipelines/clickhouse-to-neo4j">
+    Create graph relationships from ClickHouse data
+  </Card>
+</CardGroup>

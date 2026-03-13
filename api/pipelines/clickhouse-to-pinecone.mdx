@@ -1,0 +1,536 @@
+---
+title: 'ClickHouse to Pinecone Pipeline'
+description: 'Generate vector embeddings from text data and index in Pinecone for semantic search'
+icon: 'magnifying-glass'
+---
+
+## Overview
+
+The ClickHouse to Pinecone pipeline generates vector embeddings from movie and TV series text data (overview and tagline) and indexes them in Pinecone. This enables semantic search capabilities across entertainment content using natural language queries.
+
+## Module Path
+
+```python
+from batch_jobs.pipelines.silver_gold.clickhouse_to_pinecone import write_clickhouse_to_pinecone
+```
+
+## Purpose
+
+- **Text Embedding**: Generate dense vector embeddings from text using transformer models
+- **Semantic Search**: Enable natural language search across movies and TV series
+- **Namespace Isolation**: Separate movie and TV series vectors into different namespaces
+- **Incremental Updates**: Process only the latest batch version from ClickHouse
+- **Batch Processing**: Efficiently encode large text datasets using GPU acceleration
+
+## Data Flow
+
+<CardGroup cols={2}>
+  <Card title="Input" icon="database">
+    **ClickHouse Tables**
+    - `movie` (overview, tagline)
+    - `tv_series` (overview, tagline)
+  </Card>
+  <Card title="Output" icon="magnifying-glass">
+    **Pinecone Index**
+    - Dense vectors (1024 dimensions)
+    - Namespaces: movie, tv_series
+    - Metadata for filtering
+  </Card>
+</CardGroup>
+
+## Configuration Parameters
+
+<ParamField path="spark.app_name_3" type="string" required>
+  Spark application name for this pipeline
+</ParamField>
+
+<ParamField path="storage.redis.keys.dedup_batch_version" type="string" required>
+  Redis key prefix for tracking batch versions
+</ParamField>
+
+<ParamField path="storage.clickhouse.host" type="string" required>
+  ClickHouse server hostname
+</ParamField>
+
+<ParamField path="storage.clickhouse.port" type="integer" required>
+  ClickHouse native protocol port (default: 9000)
+</ParamField>
+
+<ParamField path="storage.pinecone.api_key" type="string" required>
+  Pinecone API key for authentication
+</ParamField>
+
+<ParamField path="storage.pinecone.environment" type="string" required>
+  Pinecone environment (e.g., `us-west1-gcp`)
+</ParamField>
+
+<ParamField path="storage.pinecone.index_name" type="string" required>
+  Pinecone index name
+</ParamField>
+
+<ParamField path="storage.pinecone.namespace.movie" type="string" required>
+  Namespace for movie vectors (e.g., `"movie"`)
+</ParamField>
+
+<ParamField path="storage.pinecone.namespace.tv_series" type="string" required>
+  Namespace for TV series vectors (e.g., `"tv_series"`)
+</ParamField>
+
+## Function Signatures
+
+### `write_clickhouse_to_pinecone()`
+
+Main entry point for the ClickHouse to Pinecone pipeline.
+
+```python
+def write_clickhouse_to_pinecone(transform_map=TRANSFORM_MAP):
+    """
+    Pipeline to write to Pinecone from ClickHouse
+    """
+```
+
+<ParamField path="transform_map" type="dict" default="TRANSFORM_MAP">
+  Configuration mapping for vector generation
+</ParamField>
+
+**Returns**: None (writes to Pinecone)
+
+**Process Flow**:
+1. Load settings and initialize logging
+2. Connect to Redis for version tracking
+3. Create Spark session with ClickHouse connector
+4. For each table (movie, tv_series):
+   - Read latest batch from ClickHouse
+   - Concatenate text columns (overview, tagline)
+   - Generate vector embeddings using transformer model
+   - Write to Pinecone with namespace and metadata
+
+### `prepare_vector_schema()`
+
+Transforms ClickHouse data into Pinecone vector format.
+
+```python
+def prepare_vector_schema(
+    df: DataFrame,
+    id_col: str,
+    namespace: str,
+    vector_prepare_cols: list[str],
+    model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+    vector_col_name: str = "document",
+    metadata: str = "None"
+) -> DataFrame
+```
+
+<ParamField path="df" type="DataFrame" required>
+  Input DataFrame from ClickHouse
+</ParamField>
+
+<ParamField path="id_col" type="string" required>
+  Column to use as Pinecone vector ID (e.g., `"movie_id"`)
+</ParamField>
+
+<ParamField path="namespace" type="string" required>
+  Pinecone namespace for organizing vectors
+</ParamField>
+
+<ParamField path="vector_prepare_cols" type="list[str]" required>
+  Text columns to concatenate for embedding (e.g., `["overview", "tagline"]`)
+</ParamField>
+
+<ParamField path="model_name" type="string" default="sentence-transformers/all-MiniLM-L6-v2">
+  HuggingFace transformer model for embedding generation
+  
+  Recommended models:
+  - `intfloat/e5-large-v2` (1024 dims, high quality)
+  - `sentence-transformers/all-MiniLM-L6-v2` (384 dims, fast)
+  - `BAAI/bge-large-en-v1.5` (1024 dims, state-of-the-art)
+</ParamField>
+
+<ParamField path="vector_col_name" type="string" default="document">
+  Name for concatenated text column
+</ParamField>
+
+<ParamField path="metadata" type="string" default="None">
+  JSON string with additional metadata to store with vectors
+</ParamField>
+
+**Returns**: DataFrame with Pinecone schema:
+- `id` (String): Vector ID
+- `namespace` (String): Pinecone namespace
+- `values` (Array[Float]): Dense vector embedding
+- `metadata` (String): JSON metadata
+- `sparse_values` (Struct): Sparse vector (null for dense-only)
+
+### `prepare_vector_col()`
+
+Concatenates text columns for embedding.
+
+```python
+def prepare_vector_col(
+    df: DataFrame,
+    vector_prepare_cols: list[str],
+    vector_col_name: str = "document"
+) -> DataFrame
+```
+
+**Process**: Concatenates columns using ` | ` separator
+
+**Example**:
+```python
+# Input columns:
+# overview: "A computer hacker learns..."
+# tagline: "Welcome to the Real World."
+
+# Output document:
+# "A computer hacker learns... | Welcome to the Real World."
+```
+
+### `get_embed_udf()`
+
+Creates a Pandas UDF for batch embedding generation.
+
+```python
+def get_embed_udf(model_name: str = "sentence-transformers/all-MiniLM-L6-v2")
+```
+
+**Returns**: Pandas UDF that:
+- Loads transformer model once per executor
+- Processes texts in batches of 64
+- Normalizes embeddings for cosine similarity
+- Returns list of floats for each text
+
+## Transform Map Configuration
+
+```python
+TRANSFORM_MAP = {
+    "movie": {
+        "id_col": "movie_id",
+        "vector_prepare_cols": ["overview", "tagline"],
+        "vector_col_name": "document",
+        "metadata": "{}"
+    },
+    "tv_series": {
+        "id_col": "tv_series_id",
+        "vector_prepare_cols": ["overview", "tagline"],
+        "vector_col_name": "document",
+        "metadata": "{}"
+    },
+}
+```
+
+## Usage Examples
+
+<CodeGroup>
+```python Direct Execution
+from batch_jobs.pipelines.silver_gold.clickhouse_to_pinecone import write_clickhouse_to_pinecone
+
+if __name__ == "__main__":
+    write_clickhouse_to_pinecone()
+```
+
+```python Airflow DAG
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from batch_jobs.pipelines.silver_gold.clickhouse_to_pinecone import write_clickhouse_to_pinecone
+from datetime import datetime
+
+with DAG(
+    dag_id='clickhouse_to_pinecone_pipeline',
+    start_date=datetime(2024, 1, 1),
+    schedule_interval='@daily',
+    catchup=False
+) as dag:
+    
+    vector_task = PythonOperator(
+        task_id='write_clickhouse_to_pinecone',
+        python_callable=write_clickhouse_to_pinecone
+    )
+```
+
+```python Custom Model
+from batch_jobs.pipelines.silver_gold.clickhouse_to_pinecone import write_clickhouse_to_pinecone
+
+# Use a different embedding model
+custom_transform_map = {
+    "movie": {
+        "id_col": "movie_id",
+        "vector_prepare_cols": ["overview", "tagline", "original_title"],
+        "vector_col_name": "document",
+        "metadata": '{"type": "movie"}'
+    }
+}
+
+write_clickhouse_to_pinecone(transform_map=custom_transform_map)
+```
+
+```python Direct Vector Generation
+from batch_jobs.tranforms.clickhouse_pinecone.prepare_vector_df import prepare_vector_schema
+from batch_jobs.io.readers.clickhouse_reader import ClickHouseReader
+from batch_jobs.io.writers.pinecone_writer import PineconeWriter
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.appName("VectorGeneration").getOrCreate()
+clickhouse_reader = ClickHouseReader(spark)
+pinecone_writer = PineconeWriter(spark)
+
+# Read data
+movie_df = clickhouse_reader.read_table("movie")
+
+# Generate vectors
+vector_df = prepare_vector_schema(
+    df=movie_df,
+    id_col="movie_id",
+    namespace="movie",
+    model_name="intfloat/e5-large-v2",
+    vector_prepare_cols=["overview", "tagline"],
+    vector_col_name="document",
+    metadata='{}'
+)
+
+# Write to Pinecone
+pinecone_writer.write_index(vector_df)
+```
+</CodeGroup>
+
+## Embedding Models
+
+### Default Model: intfloat/e5-large-v2
+
+<Card title="E5 Large v2" icon="brain">
+  **Dimensions**: 1024
+  
+  **Performance**: High quality embeddings for semantic search
+  
+  **Usage**: Prefix queries with "query: " and passages with "passage: "
+  
+  **Example**:
+  ```python
+  # For indexing (passage)
+  text = "passage: " + movie_overview
+  
+  # For searching (query)
+  query = "query: movies about artificial intelligence"
+  ```
+</Card>
+
+### Alternative Models
+
+<CodeGroup>
+```python all-MiniLM-L6-v2 (Fast)
+model_name = "sentence-transformers/all-MiniLM-L6-v2"
+# Dimensions: 384
+# Speed: Very fast
+# Quality: Good for general use
+```
+
+```python BGE Large (State-of-the-art)
+model_name = "BAAI/bge-large-en-v1.5"
+# Dimensions: 1024
+# Speed: Moderate
+# Quality: Excellent
+# Prefix: "Represent this sentence for searching relevant passages: "
+```
+
+```python OpenAI Ada-002 (API-based)
+# Not directly supported, requires custom implementation
+# Dimensions: 1536
+# Cost: ~$0.0001 per 1K tokens
+```
+</CodeGroup>
+
+## Pinecone Index Configuration
+
+Create a Pinecone index before running the pipeline:
+
+```python
+import pinecone
+
+pinecone.init(
+    api_key="your-api-key",
+    environment="us-west1-gcp"
+)
+
+pinecone.create_index(
+    name="entertainment-search",
+    dimension=1024,  # Must match model dimensions
+    metric="cosine",  # cosine, euclidean, or dotproduct
+    pod_type="p1.x1"  # Performance tier
+)
+```
+
+## Semantic Search Examples
+
+After indexing, query the vectors using Pinecone:
+
+<CodeGroup>
+```python Python SDK
+import pinecone
+from sentence_transformers import SentenceTransformer
+
+# Initialize
+pinecone.init(api_key="...", environment="...")
+index = pinecone.Index("entertainment-search")
+model = SentenceTransformer("intfloat/e5-large-v2")
+
+# Generate query vector
+query = "movies about time travel and paradoxes"
+query_vector = model.encode("query: " + query).tolist()
+
+# Search movies
+results = index.query(
+    vector=query_vector,
+    namespace="movie",
+    top_k=10,
+    include_metadata=True
+)
+
+for match in results['matches']:
+    print(f"Movie ID: {match['id']}, Score: {match['score']}")
+```
+
+```python Hybrid Search (Text + Filters)
+# Search with metadata filters
+results = index.query(
+    vector=query_vector,
+    namespace="movie",
+    top_k=10,
+    filter={
+        "batch_version": {"$gte": 40},
+        "genre": "Science Fiction"
+    }
+)
+```
+
+```python Multi-namespace Search
+# Search both movies and TV series
+movie_results = index.query(
+    vector=query_vector,
+    namespace="movie",
+    top_k=5
+)
+
+tv_results = index.query(
+    vector=query_vector,
+    namespace="tv_series",
+    top_k=5
+)
+
+# Combine and re-rank
+all_results = sorted(
+    movie_results['matches'] + tv_results['matches'],
+    key=lambda x: x['score'],
+    reverse=True
+)[:10]
+```
+</CodeGroup>
+
+## Vector Schema
+
+Pinecone vectors have this structure:
+
+```json
+{
+  "id": "550",
+  "values": [0.0234, -0.0156, 0.0891, ...],  // 1024 floats
+  "metadata": {},
+  "namespace": "movie"
+}
+```
+
+## Performance Considerations
+
+<Card title="Optimization Tips" icon="gauge-high">
+  **Batch Size**: UDF processes 64 texts per batch
+  
+  **GPU Acceleration**: Use GPU-enabled Spark executors for faster encoding
+  
+  **Model Caching**: Model loads once per executor, not per batch
+  
+  **Normalization**: Embeddings normalized for faster cosine similarity
+  
+  **Partitioning**: Repartition DataFrame before embedding for parallelism
+</Card>
+
+### Performance Metrics
+
+| Model | Dimensions | Speed | GPU Memory |
+|-------|-----------|-------|------------|
+| all-MiniLM-L6-v2 | 384 | ~1000 texts/sec | 1 GB |
+| e5-large-v2 | 1024 | ~400 texts/sec | 4 GB |
+| bge-large-en-v1.5 | 1024 | ~350 texts/sec | 6 GB |
+
+## Error Handling
+
+<Warning>
+  **Model Download**: The first run downloads the model (~1.5 GB for e5-large-v2). Ensure executors have internet access or pre-download models.
+</Warning>
+
+<Note>
+  **Null Handling**: If `overview` or `tagline` is null, concatenation still works:
+  ```python
+  concat_ws(" | ", null, "Some text") → "Some text"
+  ```
+</Note>
+
+## Dependencies
+
+- **PySpark**: Data processing framework
+- **ClickHouse**: Source OLAP database
+- **Pinecone**: Vector database for search
+- **Redis**: Version tracking
+- **sentence-transformers**: Transformer model library
+- **PyTorch**: Deep learning backend
+
+## Logging
+
+Key logged events:
+
+```python
+logger.info(f"Processing table: {table_name}")
+logger.info(f"Last version for {version_key} found in Redis: {last_version}")
+logger.info(f"Finish processing table: {table_name}")
+```
+
+## Related Pipelines
+
+<CardGroup cols={3}>
+  <Card title="Silver to ClickHouse" icon="arrow-left" href="/api/pipelines/silver-to-clickhouse">
+    Previous: Load data into ClickHouse
+  </Card>
+  <Card title="ClickHouse to Neo4j" icon="diagram-project" href="/api/pipelines/clickhouse-to-neo4j">
+    Parallel: Create graph relationships
+  </Card>
+  <Card title="Bronze to Silver" icon="arrow-left" href="/api/pipelines/bronze-to-silver">
+    Start: Data deduplication
+  </Card>
+</CardGroup>
+
+## Advanced: Custom Metadata
+
+You can enrich vectors with metadata for filtering:
+
+```python
+import json
+
+custom_transform_map = {
+    "movie": {
+        "id_col": "movie_id",
+        "vector_prepare_cols": ["overview", "tagline"],
+        "vector_col_name": "document",
+        "metadata": json.dumps({
+            "type": "movie",
+            "source": "tmdb",
+            "indexed_at": "2024-01-15"
+        })
+    }
+}
+```
+
+Then filter during search:
+```python
+results = index.query(
+    vector=query_vector,
+    filter={"type": "movie", "source": "tmdb"},
+    top_k=10
+)
+```

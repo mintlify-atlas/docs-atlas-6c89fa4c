@@ -1,0 +1,655 @@
+---
+title: Troubleshooting
+description: Diagnose and resolve common issues in the Entertainment Data Platform
+---
+
+## Overview
+
+This guide helps you identify and resolve common issues across the Entertainment Data Platform. Follow the diagnostic steps and solutions for each component.
+
+## Common Issues and Solutions
+
+### Configuration Issues
+
+#### Config File Not Found
+
+<Warning>
+  **Error**: `Config file not found: /path/to/config.{env}.yml`
+  
+  **Source**: All services (settings.py files)
+</Warning>
+
+**Symptoms**:
+- Service fails to start
+- Error logged: `"Config file not found: {path}"`
+
+**Diagnosis**:
+```bash
+# Check if config file exists
+ls -la src/*/config/config.*.yml
+
+# Verify APP_ENV variable
+echo $APP_ENV
+```
+
+**Solutions**:
+
+<Steps>
+  <Step title="Verify APP_ENV">
+    Ensure `APP_ENV` is set correctly:
+    ```bash
+    export APP_ENV=dev  # or prod
+    ```
+  </Step>
+  <Step title="Check Config File">
+    Verify the config file exists:
+    ```bash
+    # For development
+    ls src/stream_processor/config/config.dev.yml
+    ls src/batch_jobs/config/config.dev.yml
+    ls src/ingestion/config/config.dev.yml
+    ```
+  </Step>
+  <Step title="Copy Template">
+    If missing, copy from the template:
+    ```bash
+    cp src/stream_processor/config/config.dev.yml.template \
+       src/stream_processor/config/config.dev.yml
+    ```
+  </Step>
+</Steps>
+
+#### Missing Environment Variables
+
+**Symptoms**:
+- Neo4j or Pinecone connections fail
+- Warning logs: `"NEO4J_URI not found in env"`, `"PINECONE_API_KEY not found"`
+
+**Required Environment Variables**:
+
+<CodeGroup>
+```bash Neo4j Variables
+export NEO4J_URI="neo4j+s://your-instance.databases.neo4j.io"
+export NEO4J_USERNAME="neo4j"
+export NEO4J_PASSWORD="your-password"
+export NEO4J_DATABASE="neo4j"
+export AURA_INSTANCEID="your-instance-id"
+export AURA_INSTANCENAME="your-instance-name"
+```
+
+```bash Pinecone Variables
+export PINECONE_API_KEY="your-api-key"
+export PINECONE_INDEX_NAME="entertainment-index"
+```
+
+```bash General Variables
+export APP_ENV="dev"
+export LOG_LEVEL="INFO"
+```
+</CodeGroup>
+
+**Solution**:
+
+Create a `.env` file in `src/batch_jobs/config/`:
+
+```bash
+# src/batch_jobs/config/.env
+NEO4J_URI=neo4j+s://your-instance.databases.neo4j.io
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=your-password
+NEO4J_DATABASE=neo4j
+AURA_INSTANCEID=your-instance-id
+AURA_INSTANCENAME=your-instance-name
+PINECONE_API_KEY=your-api-key
+PINECONE_INDEX_NAME=entertainment-index
+```
+
+<Tip>
+  The batch_jobs service automatically loads `.env` files (batch_jobs/config/settings.py:124-126)
+</Tip>
+
+## Stream Processing Issues
+
+### Kafka Connection Failures
+
+**Symptoms**:
+- Stream processor fails to start
+- Error: `Connection to broker failed`
+- No data flowing from Kafka
+
+**Diagnosis**:
+
+```bash
+# Check Kafka broker status
+kafka-broker-api-versions.sh --bootstrap-server localhost:9092
+
+# List available topics
+kafka-topics.sh --bootstrap-server localhost:9092 --list
+
+# Verify topic exists
+kafka-topics.sh --bootstrap-server localhost:9092 \
+  --describe --topic tmdb.movies.raw
+```
+
+**Solutions**:
+
+<Accordion title="Solution 1: Verify Kafka Bootstrap Servers">
+  Check the configuration in `stream_processor/config/config.dev.yml:8`:
+  
+  ```yaml
+  sources:
+    kafka:
+      server:
+        bootstrap_servers: localhost:9092  # Verify this is correct
+  ```
+  
+  For Docker deployments, use the service name:
+  ```yaml
+  bootstrap_servers: kafka:9092
+  ```
+</Accordion>
+
+<Accordion title="Solution 2: Create Missing Topics">
+  ```bash
+  # Create topics if they don't exist
+  kafka-topics.sh --bootstrap-server localhost:9092 \
+    --create --topic tmdb.movies.raw --partitions 3 --replication-factor 1
+  
+  kafka-topics.sh --bootstrap-server localhost:9092 \
+    --create --topic tmdb.tv_series.raw --partitions 3 --replication-factor 1
+  
+  kafka-topics.sh --bootstrap-server localhost:9092 \
+    --create --topic tmdb.people.raw --partitions 3 --replication-factor 1
+  ```
+</Accordion>
+
+<Accordion title="Solution 3: Check Network Connectivity">
+  ```bash
+  # Test connection to Kafka
+  telnet localhost 9092
+  
+  # Or using nc
+  nc -zv localhost 9092
+  ```
+</Accordion>
+
+### High Invalid Schema Rate
+
+**Symptoms**:
+- Many records going to invalid Delta Lake tables
+- Data quality issues downstream
+
+**Diagnosis**:
+
+```python
+# Check invalid records in Delta Lake
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.getOrCreate()
+
+# Read invalid records
+invalid_df = spark.read.format("delta").load(
+    "s3a://deltalake/bronze/invalid/movies"
+)
+
+# Analyze validation failures
+invalid_df.select("raw_df", "data_type", "data_label").show(truncate=False)
+```
+
+**Common Validation Rules** (stream_processor/processor/event_processor.py:41-47):
+- `data_type` must not be null
+- `data_label` must not be null
+- `timestamp` must not be null
+- `process_timestamp` must not be null
+- Entity ID must not be null (movie_id, tv_series_id, or person_id)
+
+**Solutions**:
+
+<Steps>
+  <Step title="Check Source Data">
+    Verify incoming Kafka messages have required fields:
+    ```bash
+    kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+      --topic tmdb.movies.raw --max-messages 10
+    ```
+  </Step>
+  <Step title="Update Schema Validation">
+    If data format changed, update schemas in:
+    - `stream_processor/schema/event_schema.py`
+  </Step>
+  <Step title="Fix Data Pipeline">
+    Ensure ingestion service properly formats data before sending to Kafka
+  </Step>
+</Steps>
+
+### Streaming Query Failures
+
+**Symptoms**:
+- Streaming queries stop processing
+- Error in Spark UI
+- No new data in Delta Lake
+
+**Diagnosis**:
+
+```bash
+# Check Spark logs for errors
+grep "ERROR" spark-logs/*.log
+
+# Verify checkpoint locations are accessible
+mc ls local/deltalake/bronze/_checkpoints/
+```
+
+**Solutions**:
+
+<Accordion title="Solution 1: Clear Corrupted Checkpoints">
+  ```bash
+  # CAUTION: This will reset the streaming query
+  mc rm --recursive local/deltalake/bronze/_checkpoints/_valid/movies/
+  ```
+  <Warning>
+    Clearing checkpoints will restart processing from the latest Kafka offsets
+  </Warning>
+</Accordion>
+
+<Accordion title="Solution 2: Fix MinIO Connectivity">
+  Verify MinIO connection settings (stream_processor/config/config.dev.yml:15-18):
+  ```yaml
+  sinks:
+    delta_lake:
+      minio_endpoint: "http://localhost:9000"
+      minio_access_key: "minio"
+      minio_secret_key: "minio123"
+  ```
+</Accordion>
+
+## DLQ Investigation
+
+### Dead Letter Queue (Invalid Records)
+
+The platform uses Delta Lake invalid tables as a DLQ for records that fail schema validation.
+
+**Invalid Table Locations**:
+- Movies: `s3a://deltalake/bronze/invalid/movies`
+- TV Series: `s3a://deltalake/bronze/invalid/tvseries`
+- People: `s3a://deltalake/bronze/invalid/people`
+
+**Investigating Invalid Records**:
+
+<CodeGroup>
+```python PySpark Investigation
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.getOrCreate()
+
+# Read invalid records
+invalid_df = spark.read.format("delta").load(
+    "s3a://deltalake/bronze/invalid/movies"
+)
+
+# Show recent invalid records
+invalid_df.orderBy("process_timestamp", ascending=False).show(10, truncate=False)
+
+# Count by validation failure reason
+invalid_df.groupBy("data_type", "data_label").count().show()
+
+# Export for manual review
+invalid_df.write.json("/tmp/invalid_records.json")
+```
+
+```sql Delta Lake SQL
+-- Create temporary view
+CREATE OR REPLACE TEMP VIEW invalid_movies
+USING delta
+LOCATION 's3a://deltalake/bronze/invalid/movies';
+
+-- Query invalid records
+SELECT 
+  process_timestamp,
+  data_type,
+  data_label,
+  raw_df
+FROM invalid_movies
+WHERE process_timestamp > current_timestamp() - INTERVAL 1 HOUR
+ORDER BY process_timestamp DESC;
+```
+</CodeGroup>
+
+**Reprocessing Invalid Records**:
+
+<Steps>
+  <Step title="Identify Root Cause">
+    Analyze why records failed validation
+  </Step>
+  <Step title="Fix Source Data">
+    Correct the ingestion pipeline or source data issues
+  </Step>
+  <Step title="Replay Messages">
+    If needed, replay Kafka messages:
+    ```bash
+    # Reset consumer group offset
+    kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
+      --group stream-processor-group \
+      --topic tmdb.movies.raw \
+      --reset-offsets --to-datetime 2024-01-01T00:00:00.000 \
+      --execute
+    ```
+  </Step>
+</Steps>
+
+## Pipeline Failures
+
+### Batch Job Failures
+
+#### Deduplication Job Fails
+
+**Symptoms**:
+- Error: `CRITICAL: Last version for {key} NOT found in Redis`
+- Job exits with code 1
+
+**Diagnosis**:
+
+```bash
+# Check Redis for batch versions
+redis-cli
+GET dedup_batch_version_movie
+GET dedup_batch_version_tv_series
+GET dedup_batch_version_person
+```
+
+**Solutions**:
+
+<Accordion title="Solution 1: Initialize Redis Version Keys">
+  ```bash
+  redis-cli
+  SET dedup_batch_version_movie 0
+  SET dedup_batch_version_tv_series 0
+  SET dedup_batch_version_person 0
+  ```
+  
+  The deduplication job will automatically set these on first run (batch_jobs/pipelines/bronze_silver/minio_to_minio.py:50-52)
+</Accordion>
+
+<Accordion title="Solution 2: Check Redis Connectivity">
+  Verify Redis settings in `batch_jobs/config/config.dev.yml:38-40`:
+  ```yaml
+  storage:
+    redis:
+      host: "localhost"
+      port: 6379
+  ```
+  
+  Test connection:
+  ```bash
+  redis-cli -h localhost -p 6379 ping
+  ```
+</Accordion>
+
+#### ClickHouse Write Failures
+
+**Symptoms**:
+- Error: `Error when write to Clickhouse table`
+- Data not appearing in ClickHouse tables
+
+**Diagnosis**:
+
+```bash
+# Test ClickHouse connection
+curl http://localhost:8123/ping
+
+# Check if tables exist
+echo "SHOW TABLES FROM silver_layer" | curl 'http://localhost:8123/' --data-binary @-
+
+# Verify credentials
+echo "SELECT 1" | curl 'http://localhost:8123/?user=default&password=' --data-binary @-
+```
+
+**Solutions**:
+
+<Steps>
+  <Step title="Initialize ClickHouse Tables">
+    Tables should be auto-created by the init script:
+    ```python
+    from batch_jobs.run_time.clickhouse.clickhouse_init import init_clickhouse
+    init_clickhouse()
+    ```
+  </Step>
+  <Step title="Check JDBC Driver">
+    Ensure ClickHouse JDBC driver is in Spark classpath:
+    ```bash
+    # Driver is configured in settings
+    # jdbc_driver: com.clickhouse.jdbc.ClickHouseDriver
+    ```
+  </Step>
+  <Step title="Verify Connection String">
+    Connection format (batch_jobs/io/writers/clickhouse_jdbc_writer.py:23):
+    ```
+    jdbc:ch://localhost:8123/silver_layer
+    ```
+  </Step>
+</Steps>
+
+## Database Connection Issues
+
+### MinIO Connection Errors
+
+**Symptoms**:
+- Bucket creation fails
+- Cannot read/write Delta Lake tables
+- S3A filesystem errors
+
+**Diagnosis**:
+
+```bash
+# Test MinIO connectivity
+mc alias set local http://localhost:9000 minio minio123
+mc ls local/
+
+# Check bucket exists
+mc ls local/deltalake
+```
+
+**Solutions**:
+
+<Accordion title="Solution 1: Verify MinIO Credentials">
+  Check configuration:
+  ```yaml
+  # stream_processor/config/config.dev.yml
+  minio_endpoint: "http://localhost:9000"
+  minio_access_key: "minio"
+  minio_secret_key: "minio123"
+  ```
+</Accordion>
+
+<Accordion title="Solution 2: Create Bucket">
+  ```bash
+  mc mb local/deltalake
+  ```
+  
+  Or let the service create it automatically (stream_processor/main.py:30-32)
+</Accordion>
+
+<Accordion title="Solution 3: Fix S3A Configuration">
+  Ensure Spark is configured with correct S3A settings:
+  ```python
+  .config("spark.hadoop.fs.s3a.endpoint", "http://localhost:9000")
+  .config("spark.hadoop.fs.s3a.access.key", "minio")
+  .config("spark.hadoop.fs.s3a.secret.key", "minio123")
+  .config("spark.hadoop.fs.s3a.path.style.access", "true")
+  ```
+</Accordion>
+
+### Neo4j Connection Timeout
+
+**Symptoms**:
+- Timeout errors when writing to Neo4j
+- Connection refused errors
+
+**Diagnosis**:
+
+```bash
+# Test Neo4j connection
+cypher-shell -a neo4j+s://your-instance.databases.neo4j.io \
+  -u neo4j -p your-password
+
+# Or using curl
+curl -u neo4j:your-password \
+  https://your-instance.databases.neo4j.io:7473/db/data/
+```
+
+**Solutions**:
+
+<Steps>
+  <Step title="Verify Environment Variables">
+    Ensure all Neo4j variables are set:
+    ```bash
+    echo $NEO4J_URI
+    echo $NEO4J_USERNAME
+    echo $NEO4J_PASSWORD
+    ```
+  </Step>
+  <Step title="Adjust Batch Size">
+    Reduce batch size if timing out (batch_jobs/config/config.dev.yml:51):
+    ```yaml
+    neo4j:
+      batch_size: 10  # Reduce from higher value
+    ```
+  </Step>
+  <Step title="Check Network Connectivity">
+    Ensure firewall allows connections to Neo4j Aura
+  </Step>
+</Steps>
+
+## Performance Degradation
+
+### Slow Stream Processing
+
+**Symptoms**:
+- Increasing consumer lag
+- Long batch processing times
+- High Spark task duration
+
+**Quick Diagnostics**:
+
+```bash
+# Check consumer lag
+kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
+  --group stream-processor-group --describe
+
+# Monitor Spark metrics in UI
+open http://localhost:4040
+```
+
+**Solutions**: See [Performance Tuning Guide](/operations/performance-tuning)
+
+### Slow Batch Jobs
+
+**Symptoms**:
+- Batch jobs taking longer than expected
+- High memory usage
+- Frequent GC pauses
+
+**Diagnosis**:
+
+<CodeGroup>
+```bash Check Spark Resources
+# Monitor Spark application
+jps -l | grep Spark
+
+# Check Java heap usage
+jstat -gc <spark-pid> 1000
+```
+
+```python Check Data Volume
+# Check Delta Lake table size
+from delta import DeltaTable
+
+delta_table = DeltaTable.forPath(spark, "s3a://deltalake/bronze/valid/movies")
+history = delta_table.history()
+history.select("version", "operation", "operationMetrics").show(truncate=False)
+```
+</CodeGroup>
+
+**Solutions**: See [Performance Tuning - Spark Optimization](/operations/performance-tuning#spark-tuning-parameters)
+
+## Debug Mode and Logging
+
+### Enabling Debug Logging
+
+<Tabs>
+  <Tab title="Environment Variable">
+    ```bash
+    export LOG_LEVEL=DEBUG
+    python -m stream_processor.main
+    ```
+  </Tab>
+  <Tab title="In Code">
+    ```python
+    import logging
+    import os
+    
+    os.environ["LOG_LEVEL"] = "DEBUG"
+    from common.logging_config import setup_logging
+    setup_logging()
+    ```
+  </Tab>
+</Tabs>
+
+### Viewing Detailed Logs
+
+<CodeGroup>
+```bash Stream Processor Debug
+export LOG_LEVEL=DEBUG
+python -m stream_processor.main 2>&1 | tee stream_processor_debug.log
+```
+
+```bash Batch Jobs Debug
+export LOG_LEVEL=DEBUG
+python -m batch_jobs.pipelines.bronze_silver.minio_to_minio 2>&1 | tee batch_debug.log
+```
+
+```bash Spark Debug
+spark-submit \
+  --conf spark.driver.extraJavaOptions="-Dlog4j.configuration=file:log4j-debug.properties" \
+  --conf spark.executor.extraJavaOptions="-Dlog4j.configuration=file:log4j-debug.properties" \
+  your_job.py
+```
+</CodeGroup>
+
+### Useful Debug Commands
+
+```bash
+# Tail logs in real-time
+tail -f app.log | grep ERROR
+
+# Filter by component
+tail -f app.log | grep "stream_processor"
+
+# Show only specific log levels
+tail -f app.log | grep -E "ERROR|WARNING"
+
+# Count errors by type
+grep ERROR app.log | cut -d'|' -f4 | sort | uniq -c | sort -rn
+```
+
+## Getting Help
+
+<CardGroup cols={2}>
+  <Card title="Check Logs" icon="file-lines">
+    Review component logs for error messages and stack traces
+  </Card>
+  <Card title="Verify Configuration" icon="gear">
+    Ensure all config files and environment variables are correct
+  </Card>
+  <Card title="Monitor Metrics" icon="chart-line" href="/operations/monitoring">
+    Use monitoring tools to identify bottlenecks
+  </Card>
+  <Card title="Optimize Performance" icon="gauge-high" href="/operations/performance-tuning">
+    Apply performance tuning recommendations
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+- Review [Monitoring Guide](/operations/monitoring) for proactive issue detection
+- See [Performance Tuning](/operations/performance-tuning) for optimization strategies
+- Check [Architecture Overview](/architecture) to understand system design

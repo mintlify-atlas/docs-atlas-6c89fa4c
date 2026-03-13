@@ -1,0 +1,352 @@
+---
+title: Medallion Architecture
+description: Understanding the Bronze, Silver, and Gold data layers and how data flows through the platform
+---
+
+The Entertainment Data Platform implements a **Medallion Architecture** (also known as multi-hop architecture) to progressively refine and optimize data as it moves through the pipeline.
+
+## Architecture Overview
+
+<Note>
+The Medallion Architecture progressively refines data from raw (Bronze) to clean (Silver) to business-ready (Gold) layers, ensuring data quality and reliability throughout the pipeline.
+</Note>
+
+The architecture consists of three layers, each serving a specific purpose:
+
+<CardGroup cols={3}>
+  <Card title="Bronze" icon="database" color="#CD7F32">
+    Raw, unprocessed data with full history
+  </Card>
+  <Card title="Silver" icon="layer-group" color="#C0C0C0">
+    Cleaned, deduplicated, validated data
+  </Card>
+  <Card title="Gold" icon="gem" color="#FFD700">
+    Business-ready, optimized tables
+  </Card>
+</CardGroup>
+
+## Bronze Layer: Raw Data Storage
+
+The Bronze layer serves as the landing zone for all incoming data from external sources.
+
+### Characteristics
+
+- **Append-only**: Data is never deleted, only added
+- **Full history**: Every event and change is preserved
+- **Change Data Feed**: Delta Lake CDF tracks all modifications
+- **Minimal transformations**: Data stored in near-raw format
+
+### Data Flow
+
+<Steps>
+  <Step title="Event Ingestion">
+    Kafka streams deliver events in real-time from data collectors
+  </Step>
+  <Step title="Stream Processing">
+    Structured Streaming processes events and validates basic structure
+  </Step>
+  <Step title="Delta Lake Write">
+    Events are written to Delta tables with CDF enabled
+  </Step>
+</Steps>
+
+### Implementation
+
+The stream processor writes data to Bronze layer Delta tables:
+
+```python
+# Source: stream_processor/main.py
+for name, topic in settings.sources.kafka.topics:
+    raw_df = read_kafka_stream(spark, settings, topic)
+    processed_df = process_event(raw_df)
+    
+    # Write to Bronze layer with CDF enabled
+    valid_query, invalid_query = delta_lake_sink_dql(
+        processed_df, 
+        valid_table_path, 
+        invalid_table_path,
+        valid_checkpoint_path, 
+        invalid_checkpoint_path
+    )
+```
+
+### Storage Configuration
+
+<ParamField path="format" type="string" default="delta">
+  Delta Lake format for ACID transactions and time travel
+</ParamField>
+
+<ParamField path="enableChangeDataFeed" type="boolean" default="true">
+  Tracks all changes for downstream processing
+</ParamField>
+
+<ParamField path="partitioning" type="string">
+  Partitioned by data type (movie, tv_series, person)
+</ParamField>
+
+<Info>
+  Bronze tables maintain separate paths for **valid** and **invalid** data, allowing reprocessing of malformed events.
+</Info>
+
+## Silver Layer: Cleaned and Deduplicated
+
+The Silver layer contains cleaned, validated, and deduplicated data ready for analytics.
+
+### Characteristics
+
+- **Latest version**: Only the most recent state of each entity
+- **Deduplication**: Timestamp-based deduplication removes duplicates
+- **Schema validation**: Data parsed and validated against defined schemas
+- **Change detection**: Hash-based tracking identifies modifications
+
+### Data Flow
+
+<Steps>
+  <Step title="Read from Bronze">
+    Batch job reads new versions from Bronze using Change Data Feed
+  </Step>
+  <Step title="Deduplication">
+    Latest record selected based on timestamp for each entity
+  </Step>
+  <Step title="Schema Parsing">
+    Raw JSON data parsed into structured PySpark schemas
+  </Step>
+  <Step title="Hash Calculation">
+    Generate hashes for change detection on nested structures
+  </Step>
+  <Step title="Upsert to Silver">
+    Merge operation updates existing records or inserts new ones
+  </Step>
+</Steps>
+
+### Deduplication Logic
+
+The pipeline implements timestamp-based deduplication:
+
+```python
+# Source: batch_jobs/tranforms/delta_delta/upsert_latest.py:97-109
+def dedup_latest_batch(
+    df: DataFrame,
+    key_columns: list[str],
+    ts_column: str
+):
+    """
+    Deduplicate DataFrame by latest timestamp
+    """
+    window = Window.partitionBy(*key_columns).orderBy(col(ts_column).desc())
+    target_df = df.withColumn("row_number", row_number().over(window)) \
+                    .filter(col("row_number") == 1) \
+                    .drop("row_number")
+    return target_df
+```
+
+### Change Detection Mechanism
+
+The Silver layer uses hash-based change detection to identify modifications:
+
+<Tabs>
+  <Tab title="Cast Changes">
+    ```python
+    # Hashes cast_info array to detect additions/removals
+    casts_total_hash = hash(casts_info)
+    casts_diff = {
+      "added": [person_ids],
+      "removed": [person_ids]
+    }
+    ```
+  </Tab>
+  <Tab title="Crew Changes">
+    ```python
+    # Hashes crews_info array to detect additions/removals
+    crews_total_hash = hash(crews_info)
+    crews_diff = {
+      "added": [person_ids],
+      "removed": [person_ids]
+    }
+    ```
+  </Tab>
+  <Tab title="Content Changes">
+    ```python
+    # Hashes overview/description text for content changes
+    vector_info_hash = hash(overview)
+    vector_info_hash_diff = (old_hash != new_hash)
+    ```
+  </Tab>
+</Tabs>
+
+### Batch Version Tracking
+
+Redis stores the last processed version for incremental processing:
+
+```python
+# Source: batch_jobs/pipelines/bronze_silver/minio_to_minio.py:48-56
+version_key = f"{settings.storage.redis.keys.dedup_batch_version}_{data_type}"
+last_version = redis_client.get(version_key)
+
+# Read only new data since last version
+from_df = delta_minio_reader.read_table_cdf(
+    target_path=from_path, 
+    start_version=int(last_version), 
+    end_version=current_version
+)
+```
+
+<Warning>
+  Silver layer processing requires the `batch_version` key in Redis. Missing versions will cause the pipeline to abort.
+</Warning>
+
+## Gold Layer: Business-Ready Tables
+
+The Gold layer contains denormalized, optimized tables for specific use cases.
+
+### Characteristics
+
+- **Query-optimized**: Structured for fast analytical queries
+- **Denormalized**: Relationships flattened for performance
+- **Multiple targets**: Data written to various systems
+- **Graph relationships**: Neo4j stores entity relationships
+
+### Data Targets
+
+The Gold layer distributes data to specialized systems:
+
+<CardGroup cols={3}>
+  <Card title="ClickHouse" icon="database">
+    OLAP database for analytical queries
+  </Card>
+  <Card title="Neo4j" icon="project-diagram">
+    Graph database for relationship queries
+  </Card>
+  <Card title="Pinecone" icon="vector-square">
+    Vector database for semantic search
+  </Card>
+</CardGroup>
+
+### Silver to ClickHouse Pipeline
+
+Transforms Silver data into denormalized ClickHouse tables:
+
+<Tabs>
+  <Tab title="Main Tables">
+    Flattened entity tables with core attributes:
+    - `movie` - Movie metadata and properties
+    - `tv_series` - TV series information
+    - `person` - People biographical data
+  </Tab>
+  <Tab title="Cast Tables">
+    Exploded cast relationships:
+    - `movie_cast` - Movie to actor relationships
+    - `tv_series_cast` - TV series to actor relationships
+  </Tab>
+  <Tab title="Crew Tables">
+    Exploded crew relationships:
+    - `movie_crew` - Movie to crew relationships
+    - `tv_series_crew` - TV series to crew relationships
+  </Tab>
+</Tabs>
+
+```python
+# Source: batch_jobs/pipelines/silver_silver/minio_to_clickhouse.py:35-78
+TRANSFORM_MAP = {
+    "movie": [
+        {"table_name": "movie", "transform_func": prepare_table_movie},
+        {"table_name": "movie_cast", "transform_func": prepare_table_movie_cast},
+        {"table_name": "movie_crew", "transform_func": prepare_table_movie_crew},
+    ],
+    "person": [
+        {"table_name": "person", "transform_func": prepare_table_person}
+    ],
+    "tv_series": [
+        {"table_name": "tv_series", "transform_func": prepare_table_tv_series},
+        {"table_name": "tv_series_cast", "transform_func": prepare_table_tv_series_cast},
+        {"table_name": "tv_series_crew", "transform_func": prepare_table_tv_series_crew},
+    ]
+}
+```
+
+### ClickHouse to Neo4j Pipeline
+
+Creates graph nodes and relationships in Neo4j:
+
+<Steps>
+  <Step title="Node Creation">
+    Create nodes for Movie, TV_Series, and Person entities
+  </Step>
+  <Step title="ACTED_IN Relationships">
+    Connect Person nodes to Movie/TV_Series via cast information
+  </Step>
+  <Step title="WORKS_ON Relationships">
+    Connect Person nodes to Movie/TV_Series via crew information
+  </Step>
+</Steps>
+
+```python
+# Source: batch_jobs/pipelines/silver_gold/clickhouse_to_neo4j.py:31-50
+"ACTED_IN": {
+    "source_label": ["Person", "Person"],
+    "target_label": ["Movie", "TV_Series"],
+    "relationship_properties": [
+        ["cast_id", "character", "credit_id", "known_for_department"],
+        ["cast_id", "character", "credit_id", "known_for_department"]
+    ]
+}
+```
+
+## Data Quality and Validation
+
+<AccordionGroup>
+  <Accordion title="Bronze Layer Validation">
+    - JSON structure validation
+    - Required field presence
+    - Data type checking
+    - Invalid records routed to separate tables
+  </Accordion>
+  
+  <Accordion title="Silver Layer Validation">
+    - Schema conformance validation
+    - Duplicate detection and removal
+    - Referential integrity checks
+    - Hash consistency validation
+  </Accordion>
+  
+  <Accordion title="Gold Layer Validation">
+    - Constraint validation (ClickHouse)
+    - Unique key constraints (Neo4j)
+    - Vector embedding validation (Pinecone)
+  </Accordion>
+</AccordionGroup>
+
+## Performance Optimization
+
+### Incremental Processing
+
+All layers use incremental processing to minimize compute:
+
+- **Change Data Feed**: Only process changed records
+- **Version tracking**: Redis maintains processing checkpoints
+- **Batch versioning**: Each batch tagged with version number
+
+### Partitioning Strategy
+
+<Tabs>
+  <Tab title="Bronze & Silver">
+    Partitioned by `data_type` (movie, tv_series, person) for isolation
+  </Tab>
+  <Tab title="Gold (ClickHouse)">
+    Custom partitioning based on query patterns and data volume
+  </Tab>
+  <Tab title="Gold (Neo4j)">
+    No partitioning - distributed by graph topology
+  </Tab>
+</Tabs>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Schema Reference" icon="code" href="./schemas">
+    Detailed schema definitions for all entities
+  </Card>
+  <Card title="Data Model Overview" icon="sitemap" href="./overview">
+    High-level data model concepts
+  </Card>
+</CardGroup>

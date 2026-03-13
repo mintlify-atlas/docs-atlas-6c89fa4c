@@ -1,0 +1,363 @@
+---
+title: 'Readers'
+description: 'Data source readers for Delta Lake and ClickHouse'
+icon: 'book-open'
+---
+
+The readers module provides classes for reading data from various storage systems in the Entertainment Data Platform.
+
+## DeltaMinioReader
+
+Reads Delta Lake tables stored in MinIO object storage using Apache Spark.
+
+### Class Definition
+
+```python
+from pyspark.sql import SparkSession
+from batch_jobs.io.readers import DeltaMinioReader
+
+reader = DeltaMinioReader(spark: SparkSession)
+```
+
+<ParamField path="spark" type="SparkSession" required>
+  Active SparkSession instance for reading Delta tables
+</ParamField>
+
+### Methods
+
+#### read_table
+
+Reads a complete Delta table from the specified path.
+
+```python
+df = reader.read_table(target_path: str)
+```
+
+<ParamField path="target_path" type="str" required>
+  Path to the Delta table in MinIO storage
+</ParamField>
+
+<ResponseField name="return" type="DataFrame">
+  PySpark DataFrame containing the table data
+</ResponseField>
+
+**Example:**
+
+```python
+from pyspark.sql import SparkSession
+from batch_jobs.io.readers import DeltaMinioReader
+
+spark = SparkSession.builder.getOrCreate()
+reader = DeltaMinioReader(spark)
+
+# Read entire table
+df = reader.read_table("s3a://bucket/path/to/delta/table")
+df.show()
+```
+
+#### read_table_with_filters
+
+Reads a Delta table with column filters applied.
+
+```python
+df = reader.read_table_with_filters(
+    target_path: str,
+    filters: dict
+)
+```
+
+<ParamField path="target_path" type="str" required>
+  Path to the Delta table in MinIO storage
+</ParamField>
+
+<ParamField path="filters" type="dict">
+  Dictionary of column names to filter values. Multiple filters are applied with AND logic.
+</ParamField>
+
+<ResponseField name="return" type="DataFrame">
+  Filtered PySpark DataFrame
+</ResponseField>
+
+**Example:**
+
+```python
+# Read with filters
+filters = {
+    "content_type": "movie",
+    "year": 2023
+}
+df = reader.read_table_with_filters(
+    "s3a://bucket/content/table",
+    filters
+)
+```
+
+#### read_table_cdf
+
+Reads Delta table Change Data Feed (CDF) to capture changes over time.
+
+```python
+df = reader.read_table_cdf(
+    target_path: str,
+    start_timestamp: str | None = None,
+    end_timestamp: str | None = None,
+    start_version: int | None = None,
+    end_version: int | None = None
+)
+```
+
+<ParamField path="target_path" type="str" required>
+  Path to the Delta table with CDF enabled
+</ParamField>
+
+<ParamField path="start_timestamp" type="str | None">
+  Starting timestamp for CDF read (ISO 8601 format)
+</ParamField>
+
+<ParamField path="end_timestamp" type="str | None">
+  Ending timestamp for CDF read (ISO 8601 format)
+</ParamField>
+
+<ParamField path="start_version" type="int | None">
+  Starting version number for CDF read
+</ParamField>
+
+<ParamField path="end_version" type="int | None">
+  Ending version number for CDF read
+</ParamField>
+
+<ResponseField name="return" type="DataFrame">
+  DataFrame with change data including _change_type, _commit_version, and _commit_timestamp columns
+</ResponseField>
+
+**Example:**
+
+<Tabs>
+  <Tab title="Timestamp Range">
+    ```python
+    # Read changes between timestamps
+    df = reader.read_table_cdf(
+        target_path="s3a://bucket/content/table",
+        start_timestamp="2024-01-01T00:00:00Z",
+        end_timestamp="2024-01-31T23:59:59Z"
+    )
+    
+    # Inspect change types
+    df.groupBy("_change_type").count().show()
+    ```
+  </Tab>
+  <Tab title="Version Range">
+    ```python
+    # Read changes between versions
+    df = reader.read_table_cdf(
+        target_path="s3a://bucket/content/table",
+        start_version=10,
+        end_version=20
+    )
+    
+    # Process inserts only
+    inserts = df.filter(df._change_type == "insert")
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  Change Data Feed must be enabled on the Delta table using `delta.enableChangeDataFeed=true` property.
+</Note>
+
+---
+
+## ClickHouseReader
+
+Reads data from ClickHouse analytical database using Spark JDBC connector.
+
+### Class Definition
+
+```python
+from pyspark.sql import SparkSession
+from batch_jobs.io.readers import ClickHouseReader
+
+reader = ClickHouseReader(spark: SparkSession)
+```
+
+<ParamField path="spark" type="SparkSession" required>
+  Active SparkSession instance configured with ClickHouse catalog
+</ParamField>
+
+### Configuration
+
+The reader automatically loads ClickHouse connection settings from the application configuration:
+
+<ParamField path="storage.clickhouse.jdbc_driver" type="str">
+  JDBC driver class name
+</ParamField>
+
+<ParamField path="storage.clickhouse.host" type="str">
+  ClickHouse server hostname
+</ParamField>
+
+<ParamField path="storage.clickhouse.port" type="int">
+  ClickHouse server port
+</ParamField>
+
+<ParamField path="storage.clickhouse.database" type="str">
+  Target database name
+</ParamField>
+
+<ParamField path="storage.clickhouse.username" type="str">
+  Authentication username
+</ParamField>
+
+<ParamField path="storage.clickhouse.password" type="str">
+  Authentication password
+</ParamField>
+
+### Methods
+
+#### read_table
+
+Executes a SQL query against ClickHouse and returns results as DataFrame.
+
+```python
+df = reader.read_table(query: str)
+```
+
+<ParamField path="query" type="str" required>
+  SQL SELECT query to execute
+</ParamField>
+
+<ResponseField name="return" type="DataFrame">
+  PySpark DataFrame with query results
+</ResponseField>
+
+**Example:**
+
+```python
+from pyspark.sql import SparkSession
+from batch_jobs.io.readers import ClickHouseReader
+
+spark = SparkSession.builder.getOrCreate()
+reader = ClickHouseReader(spark)
+
+# Execute custom query
+query = """
+    SELECT 
+        content_id,
+        title,
+        view_count
+    FROM content_metrics
+    WHERE view_count > 1000
+    ORDER BY view_count DESC
+    LIMIT 100
+"""
+df = reader.read_table(query)
+```
+
+#### read_table_with_filters
+
+Reads a ClickHouse table with filters applied to specific columns.
+
+```python
+df = reader.read_table_with_filters(
+    table_name: str,
+    filters: list[dict]
+)
+```
+
+<ParamField path="table_name" type="str" required>
+  Name of the ClickHouse table to read
+</ParamField>
+
+<ParamField path="filters" type="list[dict]" required>
+  List of filter dictionaries where each dictionary maps column names to filter values
+</ParamField>
+
+<ResponseField name="return" type="DataFrame">
+  Filtered PySpark DataFrame
+</ResponseField>
+
+**Example:**
+
+```python
+# Read with multiple filters
+filters = [
+    {"content_type": "series"},
+    {"platform": "streaming"}
+]
+
+df = reader.read_table_with_filters(
+    table_name="content_analytics",
+    filters=filters
+)
+
+# Process results
+df.select("title", "episodes", "rating").show()
+```
+
+<Warning>
+  The table is accessed using the format `clickhouse.{database}.{table_name}`, which requires the ClickHouse Spark catalog to be properly configured.
+</Warning>
+
+---
+
+## Usage Patterns
+
+### Reading Incremental Changes
+
+```python
+from pyspark.sql import SparkSession
+from batch_jobs.io.readers import DeltaMinioReader
+
+spark = SparkSession.builder.getOrCreate()
+reader = DeltaMinioReader(spark)
+
+# Read changes since last processing
+last_processed_timestamp = "2024-01-01T00:00:00Z"
+changes = reader.read_table_cdf(
+    target_path="s3a://data-lake/content/table",
+    start_timestamp=last_processed_timestamp
+)
+
+# Process inserts and updates
+for change_type in ["insert", "update_postimage"]:
+    records = changes.filter(changes._change_type == change_type)
+    # Process records...
+```
+
+### Combining Filters
+
+```python
+from batch_jobs.io.readers import DeltaMinioReader, ClickHouseReader
+
+# Delta with filters
+delta_reader = DeltaMinioReader(spark)
+df = delta_reader.read_table_with_filters(
+    "s3a://bucket/content",
+    {"year": 2024, "genre": "action"}
+)
+
+# ClickHouse with filters
+ch_reader = ClickHouseReader(spark)
+metrics = ch_reader.read_table_with_filters(
+    "content_metrics",
+    [{"year": 2024}, {"metric_type": "views"}]
+)
+
+# Join datasets
+result = df.join(metrics, "content_id")
+```
+
+### Error Handling
+
+```python
+try:
+    reader = DeltaMinioReader(spark)
+    df = reader.read_table("s3a://bucket/table")
+    
+    if df.isEmpty():
+        print("No data found in table")
+    else:
+        df.show()
+except Exception as e:
+    print(f"Error reading table: {e}")
+```

@@ -1,97 +1,138 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "Entertainment Data Platform"
+description: "A distributed data platform that ingests, processes, and organizes Movies, TV Series, and People data to enable interactive search, analytics, and RAG applications."
 ---
 
-## Setting up
+<div className="bg-gradient-to-br from-[#94cb04]/10 to-[#545454]/10 rounded-lg p-12 mb-8">
+  <h1 className="text-5xl font-bold mb-6">Entertainment Data Platform</h1>
+  <p className="text-xl text-gray-700 mb-8">
+    A high-performance data engineering ecosystem built to process and organize large-scale Movies, TV Series, and People data with Medallion Architecture powered by Delta Lake.
+  </p>
+  <div className="flex gap-4">
+    <a href="/quickstart" className="inline-flex items-center px-6 py-3 bg-[#94cb04] text-white font-semibold rounded-md hover:bg-[#7fb003] transition-colors">
+      Get Started
+    </a>
+    <a href="https://github.com/khoatran18/entertainment-data-platform" className="inline-flex items-center px-6 py-3 bg-[#e6e6e6] text-[#1a1a1a] font-semibold rounded-md hover:bg-[#d9d9d9] transition-colors">
+      View on GitHub
+    </a>
+  </div>
+</div>
 
-Get your documentation site up and running in minutes.
+## Key Features
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="High-Throughput Stream Processing" icon="bolt" href="/components/stream-processor">
+    Leverage Spark Structured Streaming to ingest and validate data from Apache Kafka with fault-tolerant DLQ handling.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Medallion Architecture" icon="layer-group" href="/data-model/medallion-architecture">
+    Implement Bronze → Silver → Gold layers with Delta Lake for deduplication, schema integrity, and audit trails.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Multi-Database Serving" icon="database" href="/architecture">
+    Power OLAP analytics (ClickHouse), relationship mapping (Neo4j), and AI-driven RAG (Pinecone) from a unified pipeline.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Intelligent Change Detection" icon="sync" href="/components/batch-jobs">
+    Optimize downstream updates with sophisticated change-tracking that syncs only when data actually changes.
   </Card>
-</Columns>
+  <Card title="Production-Ready Deployment" icon="rocket" href="/deployment/docker">
+    Seamlessly transition from local development to scale-out production using Docker Compose and Kubernetes.
+  </Card>
+  <Card title="Dead Letter Queue" icon="inbox" href="/components/stream-processor">
+    Route failed records to DLQ storage instead of halting the pipeline, ensuring 24/7 availability.
+  </Card>
+</CardGroup>
 
-## Create beautiful pages
+## Quick Start
 
-Everything you need to create world-class documentation.
+<Steps>
+  <Step title="Install Dependencies">
+    Install Python dependencies and ensure Java 17 is available.
+    ```bash
+    pip install -r requirements.txt
+    ```
+  </Step>
+  <Step title="Start Infrastructure">
+    Launch Kafka and databases using Docker Compose.
+    ```bash
+    cd deployment/docker
+    docker compose -f docker_compose.yml up -d
+    ```
+  </Step>
+  <Step title="Run Stream Processing">
+    Start the ingestion and stream processor to handle Kafka events.
+    ```bash
+    export PYTHONPATH=$(pwd)/src
+    python -m ingestion.main
+    python -m stream_processor.main
+    ```
+  </Step>
+  <Step title="Execute Batch Pipelines">
+    Run the Bronze → Silver → Gold pipelines sequentially.
+    ```bash
+    python -m batch_jobs.pipelines.bronze_silver.minio_to_minio
+    python -m batch_jobs.pipelines.silver_silver.minio_to_clickhouse
+    ```
+  </Step>
+</Steps>
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+## Platform Architecture
 
-## Need inspiration?
+The Entertainment Data Platform implements a comprehensive data engineering ecosystem with multiple specialized components:
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<CardGroup cols={3}>
+  <Card title="Data Collection" icon="download" href="/components/collector">
+    Crawler scripts for TMDB API with intelligent ID tracking and versioning.
+  </Card>
+  <Card title="Stream Ingestion" icon="stream" href="/components/ingestion">
+    Real-time Kafka producers that simulate production traffic patterns.
+  </Card>
+  <Card title="Stream Processing" icon="fire" href="/components/stream-processor">
+    Spark Structured Streaming with lightweight parsing and DLQ routing.
+  </Card>
+  <Card title="Batch Jobs" icon="gears" href="/components/batch-jobs">
+    Airflow-orchestrated ETL pipelines for deduplication and transformation.
+  </Card>
+  <Card title="Analytics Layer" icon="chart-line" href="/data-model/overview">
+    ClickHouse for ultra-fast OLAP queries and interactive dashboards.
+  </Card>
+  <Card title="Knowledge Graph" icon="project-diagram" href="/api/pipelines/clickhouse-to-neo4j">
+    Neo4j for deep-link traversal between Movies, TV Shows, and Cast/Crew.
+  </Card>
+</CardGroup>
+
+## Tech Stack
+
+<div className="grid grid-cols-2 md:grid-cols-4 gap-4 my-6">
+  <div className="p-4 border border-[#e0e0e0] rounded-lg bg-white">
+    <div className="font-semibold mb-2">Data Ingestion</div>
+    <div className="text-sm text-gray-600">Apache Kafka, Apache Spark</div>
+  </div>
+  <div className="p-4 border border-[#e0e0e0] rounded-lg bg-white">
+    <div className="font-semibold mb-2">Orchestration</div>
+    <div className="text-sm text-gray-600">Apache Airflow</div>
+  </div>
+  <div className="p-4 border border-[#e0e0e0] rounded-lg bg-white">
+    <div className="font-semibold mb-2">Storage & Delta</div>
+    <div className="text-sm text-gray-600">Delta Lake, MinIO</div>
+  </div>
+  <div className="p-4 border border-[#e0e0e0] rounded-lg bg-white">
+    <div className="font-semibold mb-2">Databases</div>
+    <div className="text-sm text-gray-600">ClickHouse, Neo4j, Pinecone</div>
+  </div>
+</div>
+
+## Learn More
+
+<CardGroup cols={2}>
+  <Card title="System Architecture" icon="sitemap" href="/architecture">
+    Understand the complete system design and data flow through all components.
+  </Card>
+  <Card title="Deployment Guide" icon="cloud" href="/deployment/docker">
+    Deploy the platform locally with Docker or scale to production with Kubernetes.
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/pipelines/bronze-to-silver">
+    Explore the pipeline APIs and IO components for data processing.
+  </Card>
+  <Card title="Operations Guide" icon="wrench" href="/operations/monitoring">
+    Monitor, troubleshoot, and optimize the platform for production workloads.
+  </Card>
+</CardGroup>

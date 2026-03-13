@@ -1,0 +1,181 @@
+---
+title: Data Model Overview
+description: Understanding the core data model and entity relationships in the Entertainment Data Platform
+---
+
+The Entertainment Data Platform uses a structured data model to organize and relate entertainment content, including movies, TV series, and people (cast and crew members).
+
+## Core Entity Types
+
+The platform manages three primary entity types, each with its own data structure and relationships:
+
+<CardGroup cols={3}>
+  <Card title="Movies" icon="film">
+    Full movie information including titles, release dates, ratings, and metadata
+  </Card>
+  <Card title="TV Series" icon="tv">
+    Television series data with seasons, air dates, and episode information
+  </Card>
+  <Card title="People" icon="user">
+    Cast and crew members with biographical information and career details
+  </Card>
+</CardGroup>
+
+## Entity Relationships
+
+The data model establishes relationships between entities to represent real-world connections in the entertainment industry:
+
+### Cast Relationships (ACTED_IN)
+
+Connects **Person** entities to **Movie** or **TV Series** entities they appeared in.
+
+<ParamField path="cast_id" type="Long">
+  Unique identifier for the cast member in this role
+</ParamField>
+
+<ParamField path="character" type="String">
+  Character name portrayed by the actor
+</ParamField>
+
+<ParamField path="credit_id" type="String">
+  Credit identifier for this role
+</ParamField>
+
+<ParamField path="known_for_department" type="String">
+  Primary department the person is known for
+</ParamField>
+
+### Crew Relationships (WORKS_ON)
+
+Connects **Person** entities to **Movie** or **TV Series** entities they worked on.
+
+<ParamField path="department" type="String">
+  Department the crew member worked in (e.g., "Directing", "Production")
+</ParamField>
+
+<ParamField path="job" type="String">
+  Specific job title (e.g., "Director", "Producer")
+</ParamField>
+
+<ParamField path="known_for_department" type="String">
+  Primary department the person is known for
+</ParamField>
+
+## Data Structure
+
+Each entity follows a nested structure with a top-level identifier and detailed information:
+
+<CodeGroup>
+```json Movie Structure
+{
+  "movie_id": 12345,
+  "casts_info": [
+    {
+      "cast_id": 1,
+      "character": "John Doe",
+      "person_id": 67890
+    }
+  ],
+  "crews_info": [
+    {
+      "department": "Directing",
+      "job": "Director",
+      "person_id": 11111
+    }
+  ],
+  "movie_detail": {
+    "id": 12345,
+    "original_title": "Example Movie",
+    "overview": "A compelling story...",
+    "popularity": 8.5,
+    "release_date": "2024-01-01"
+  }
+}
+```
+
+```json TV Series Structure
+{
+  "tv_series_id": 54321,
+  "casts_info": [...],
+  "crews_info": [...],
+  "tv_series_detail": {
+    "id": 54321,
+    "overview": "A gripping series...",
+    "first_air_date": "2024-01-01",
+    "number_of_seasons": 3
+  }
+}
+```
+
+```json Person Structure
+{
+  "person_id": 67890,
+  "person_detail": {
+    "id": 67890,
+    "name": "Jane Smith",
+    "biography": "Award-winning actor...",
+    "known_for_department": "Acting"
+  }
+}
+```
+</CodeGroup>
+
+## Storage Architecture
+
+The platform uses a multi-layered storage architecture to optimize for different use cases:
+
+<Steps>
+  <Step title="Bronze Layer">
+    Raw data storage with full historical data and change tracking enabled
+  </Step>
+  <Step title="Silver Layer">
+    Cleaned, deduplicated data with the latest version of each entity
+  </Step>
+  <Step title="Gold Layer">
+    Business-ready tables optimized for specific query patterns and analytics
+  </Step>
+</Steps>
+
+<Info>
+  All layers use **Delta Lake** format with Change Data Feed (CDF) enabled for tracking modifications over time.
+</Info>
+
+## Data Lineage
+
+Each entity maintains metadata for tracking lineage and versioning:
+
+- **timestamp**: When the data was ingested
+- **batch_version**: Version number for batch processing
+- **data_type**: Entity type (movie, tv_series, person)
+- **id_of_data_type**: The primary identifier for the entity
+
+## Key Design Principles
+
+<AccordionGroup>
+  <Accordion title="Immutability">
+    Raw data in the Bronze layer is never deleted, only appended. This ensures full historical tracking and audit capability.
+  </Accordion>
+  
+  <Accordion title="Schema Evolution">
+    The platform supports schema evolution, allowing fields to be added without breaking existing pipelines.
+  </Accordion>
+  
+  <Accordion title="Change Detection">
+    Hash-based change detection identifies modifications to nested structures (casts, crews) and content (overviews, descriptions).
+  </Accordion>
+  
+  <Accordion title="Denormalization">
+    Gold layer tables are denormalized for optimal query performance in analytical workloads.
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Medallion Architecture" icon="layer-group" href="./medallion-architecture">
+    Deep dive into the Bronze, Silver, and Gold layers
+  </Card>
+  <Card title="Schema Reference" icon="code" href="./schemas">
+    Complete schema definitions and field specifications
+  </Card>
+</CardGroup>

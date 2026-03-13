@@ -1,0 +1,610 @@
+---
+title: Schema Reference
+description: Complete schema definitions for all entities in the Entertainment Data Platform
+---
+
+This reference documents all schema definitions used across the platform, from raw event schemas to entity schemas for movies, TV series, and people.
+
+## Event Schemas
+
+Event schemas define the structure of incoming data from Kafka streams.
+
+### Partial Event Schema
+
+Base event metadata for all incoming events:
+
+<ParamField path="data_type" type="String" required>
+  Type of entity ("movie", "tv_series", or "person")
+</ParamField>
+
+<ParamField path="data_label" type="String" required>
+  Label or classification for the data
+</ParamField>
+
+<ParamField path="timestamp" type="Timestamp" required>
+  When the event was generated or ingested
+</ParamField>
+
+```python
+# Source: stream_processor/schema/event_schema.py:3-7
+PARTIAL_EVENT_SCHEMA = StructType([
+    StructField("data_type", StringType(), True),
+    StructField("data_label", StringType(), True),
+    StructField("timestamp", TimestampType(), True),
+])
+```
+
+### ID Schema
+
+Entity identifiers for routing and processing:
+
+<ParamField path="person_id" type="Integer">
+  Unique identifier for person entities
+</ParamField>
+
+<ParamField path="movie_id" type="Integer">
+  Unique identifier for movie entities
+</ParamField>
+
+<ParamField path="tv_series_id" type="Integer">
+  Unique identifier for TV series entities
+</ParamField>
+
+```python
+# Source: stream_processor/schema/event_schema.py:9-13
+ID_SCHEMA = StructType([
+    StructField("person_id", IntegerType(), True),
+    StructField("movie_id", IntegerType(), True),
+    StructField("tv_series_id", IntegerType(), True),
+])
+```
+
+## Entity Schemas
+
+Entity schemas define the structure for movies, TV series, and people after parsing from raw JSON.
+
+### Movie Schema
+
+Complete schema for movie entities:
+
+<Tabs>
+  <Tab title="Root Level">
+    <ParamField path="movie_id" type="Long" required>
+      Primary identifier for the movie
+    </ParamField>
+
+    <ParamField path="casts_info" type="Array[Struct]">
+      Array of cast members who acted in the movie
+    </ParamField>
+
+    <ParamField path="crews_info" type="Array[Struct]">
+      Array of crew members who worked on the movie
+    </ParamField>
+
+    <ParamField path="movie_detail" type="Struct" required>
+      Nested structure containing movie metadata
+    </ParamField>
+  </Tab>
+  
+  <Tab title="Cast Info">
+    <ParamField path="cast_id" type="Long">
+      Unique identifier for this cast member in this role
+    </ParamField>
+
+    <ParamField path="character" type="String">
+      Name of the character portrayed
+    </ParamField>
+
+    <ParamField path="credit_id" type="String">
+      Credit identifier for this appearance
+    </ParamField>
+
+    <ParamField path="known_for_department" type="String">
+      Primary department (typically "Acting" for cast)
+    </ParamField>
+
+    <ParamField path="person_id" type="Long" required>
+      Foreign key reference to the person entity
+    </ParamField>
+  </Tab>
+  
+  <Tab title="Crew Info">
+    <ParamField path="department" type="String">
+      Department the crew member worked in (e.g., "Directing", "Production")
+    </ParamField>
+
+    <ParamField path="job" type="String">
+      Specific job title (e.g., "Director", "Producer", "Cinematographer")
+    </ParamField>
+
+    <ParamField path="known_for_department" type="String">
+      Primary department the person is known for
+    </ParamField>
+
+    <ParamField path="person_id" type="Long" required>
+      Foreign key reference to the person entity
+    </ParamField>
+  </Tab>
+  
+  <Tab title="Movie Detail">
+    <ParamField path="id" type="Long" required>
+      Movie identifier (matches root movie_id)
+    </ParamField>
+
+    <ParamField path="original_title" type="String">
+      Original title of the movie
+    </ParamField>
+
+    <ParamField path="overview" type="String">
+      Plot summary or description
+    </ParamField>
+
+    <ParamField path="popularity" type="Double">
+      Popularity score
+    </ParamField>
+
+    <ParamField path="release_date" type="String">
+      Release date in YYYY-MM-DD format
+    </ParamField>
+
+    <ParamField path="tagline" type="String">
+      Marketing tagline
+    </ParamField>
+
+    <ParamField path="vote_average" type="Double">
+      Average user rating
+    </ParamField>
+
+    <ParamField path="vote_count" type="Long">
+      Number of user votes
+    </ParamField>
+
+    <ParamField path="genres" type="Array[Struct]">
+      Array of genre information
+      - `id` (Long): Genre identifier
+      - `name` (String): Genre name
+    </ParamField>
+
+    <ParamField path="belongs_to_collection" type="Array[Struct]">
+      Collection membership (e.g., movie franchises)
+      - `id` (Long): Collection identifier
+      - `name` (String): Collection name
+    </ParamField>
+
+    <ParamField path="production_countries" type="Array[Struct]">
+      Countries where the movie was produced
+      - `iso_3166_1` (String): ISO country code
+      - `name` (String): Country name
+    </ParamField>
+  </Tab>
+</Tabs>
+
+<CodeGroup>
+```python Full Schema Definition
+# Source: batch_jobs/schema/movie_schema.py:3-50
+MOVIE_FULL_SCHEMA = StructType([
+    StructField("movie_id", LongType(), True),
+    StructField("casts_info", ArrayType(
+        StructType([
+            StructField("cast_id", LongType(), True),
+            StructField("character", StringType(), True),
+            StructField("credit_id", StringType(), True),
+            StructField("known_for_department", StringType(), True),
+            StructField("person_id", LongType(), True)
+        ])
+    )),
+    StructField("crews_info", ArrayType(
+        StructType([
+            StructField("department", StringType(), True),
+            StructField("job", StringType(), True),
+            StructField("known_for_department", StringType(), True),
+            StructField("person_id", LongType(), True)
+        ])
+    )),
+    StructField("movie_detail", StructType([
+        StructField("id", LongType(), True),
+        StructField("original_title", StringType(), True),
+        StructField("overview", StringType(), True),
+        StructField("popularity", DoubleType(), True),
+        StructField("release_date", StringType(), True),
+        StructField("tagline", StringType(), True),
+        StructField("vote_average", DoubleType(), True),
+        StructField("vote_count", LongType(), True),
+        StructField("genres", ArrayType(
+            StructType([
+                StructField("id", LongType(), True),
+                StructField("name", StringType(), True)
+            ])
+        ), True),
+        StructField("belongs_to_collection", ArrayType(
+            StructType([
+                StructField("id", LongType(), True),
+                StructField("name", StringType(), True),
+            ])
+        ), True),
+        StructField("production_countries", ArrayType(
+            StructType([
+                StructField("iso_3166_1", StringType(), True),
+                StructField("name", StringType(), True)
+            ])
+        ), True),
+    ]))
+])
+```
+
+```json Example Data
+{
+  "movie_id": 550,
+  "casts_info": [
+    {
+      "cast_id": 4,
+      "character": "The Narrator",
+      "credit_id": "52fe4250c3a36847f80149f3",
+      "known_for_department": "Acting",
+      "person_id": 819
+    }
+  ],
+  "crews_info": [
+    {
+      "department": "Directing",
+      "job": "Director",
+      "known_for_department": "Directing",
+      "person_id": 7467
+    }
+  ],
+  "movie_detail": {
+    "id": 550,
+    "original_title": "Fight Club",
+    "overview": "A ticking-time-bomb insomniac...",
+    "popularity": 63.869,
+    "release_date": "1999-10-15",
+    "tagline": "Mischief. Mayhem. Soap.",
+    "vote_average": 8.433,
+    "vote_count": 26280,
+    "genres": [{"id": 18, "name": "Drama"}],
+    "belongs_to_collection": [],
+    "production_countries": [{"iso_3166_1": "US", "name": "United States of America"}]
+  }
+}
+```
+</CodeGroup>
+
+### TV Series Schema
+
+Complete schema for TV series entities:
+
+<Tabs>
+  <Tab title="Root Level">
+    <ParamField path="tv_series_id" type="Long" required>
+      Primary identifier for the TV series
+    </ParamField>
+
+    <ParamField path="casts_info" type="Array[Struct]">
+      Array of cast members (same structure as movies)
+    </ParamField>
+
+    <ParamField path="crews_info" type="Array[Struct]">
+      Array of crew members (same structure as movies)
+    </ParamField>
+
+    <ParamField path="tv_series_detail" type="Struct" required>
+      Nested structure containing TV series metadata
+    </ParamField>
+  </Tab>
+  
+  <Tab title="TV Series Detail">
+    <ParamField path="id" type="Long" required>
+      TV series identifier (matches root tv_series_id)
+    </ParamField>
+
+    <ParamField path="overview" type="String">
+      Plot summary or description
+    </ParamField>
+
+    <ParamField path="popularity" type="Double">
+      Popularity score
+    </ParamField>
+
+    <ParamField path="first_air_date" type="String">
+      First air date in YYYY-MM-DD format
+    </ParamField>
+
+    <ParamField path="tagline" type="String">
+      Marketing tagline
+    </ParamField>
+
+    <ParamField path="vote_average" type="Double">
+      Average user rating
+    </ParamField>
+
+    <ParamField path="vote_count" type="Long">
+      Number of user votes
+    </ParamField>
+
+    <ParamField path="status" type="String">
+      Series status (e.g., "Returning Series", "Ended", "Canceled")
+    </ParamField>
+
+    <ParamField path="genres" type="Array[Struct]">
+      Array of genre information (same structure as movies)
+    </ParamField>
+
+    <ParamField path="production_countries" type="Array[Struct]">
+      Production countries (same structure as movies)
+    </ParamField>
+
+    <ParamField path="number_of_seasons" type="Integer">
+      Total number of seasons
+    </ParamField>
+  </Tab>
+</Tabs>
+
+```python
+# Source: batch_jobs/schema/tv_series_schema.py:3-45
+TV_SERIES_FULL_SCHEMA = StructType([
+    StructField("tv_series_id", LongType(), True),
+    StructField("casts_info", ArrayType(
+        StructType([
+            StructField("cast_id", LongType(), True),
+            StructField("character", StringType(), True),
+            StructField("credit_id", StringType(), True),
+            StructField("known_for_department", StringType(), True),
+            StructField("person_id", LongType(), True)
+        ])
+    )),
+    StructField("crews_info", ArrayType(
+        StructType([
+            StructField("department", StringType(), True),
+            StructField("job", StringType(), True),
+            StructField("known_for_department", StringType(), True),
+            StructField("person_id", LongType(), True)
+        ])
+    )),
+    StructField("tv_series_detail", StructType([
+        StructField("id", LongType(), True),
+        StructField("overview", StringType(), True),
+        StructField("popularity", DoubleType(), True),
+        StructField("first_air_date", StringType(), True),
+        StructField("tagline", StringType(), True),
+        StructField("vote_average", DoubleType(), True),
+        StructField("vote_count", LongType(), True),
+        StructField("status", StringType(), True),
+        StructField("genres", ArrayType(
+            StructType([
+                StructField("id", LongType(), True),
+                StructField("name", StringType(), True)
+            ])
+        ), True),
+        StructField("production_countries", ArrayType(
+            StructType([
+                StructField("iso_3166_1", StringType(), True),
+                StructField("name", StringType(), True)
+            ])
+        ), True),
+        StructField("number_of_seasons", IntegerType(), True),
+    ]), True)
+])
+```
+
+### Person Schema
+
+Complete schema for person entities:
+
+<ParamField path="person_id" type="Long" required>
+  Primary identifier for the person
+</ParamField>
+
+<ParamField path="person_detail" type="Struct" required>
+  Nested structure containing person biographical information
+</ParamField>
+
+<Accordion title="Person Detail Fields">
+  <ParamField path="id" type="Long" required>
+    Person identifier (matches root person_id)
+  </ParamField>
+
+  <ParamField path="name" type="String" required>
+    Full name of the person
+  </ParamField>
+
+  <ParamField path="gender" type="Integer">
+    Gender identifier (0 = Not specified, 1 = Female, 2 = Male, 3 = Non-binary)
+  </ParamField>
+
+  <ParamField path="also_known_as" type="Array[String]">
+    Alternative names or aliases
+  </ParamField>
+
+  <ParamField path="biography" type="String">
+    Biographical information and career summary
+  </ParamField>
+
+  <ParamField path="birthday" type="String">
+    Birth date in YYYY-MM-DD format
+  </ParamField>
+
+  <ParamField path="deathday" type="String">
+    Death date in YYYY-MM-DD format (null if alive)
+  </ParamField>
+
+  <ParamField path="place_of_birth" type="String">
+    Birthplace (city, country)
+  </ParamField>
+
+  <ParamField path="known_for_department" type="String">
+    Primary department (e.g., "Acting", "Directing", "Production")
+  </ParamField>
+
+  <ParamField path="popularity" type="Double">
+    Popularity score
+  </ParamField>
+</Accordion>
+
+```python
+# Source: batch_jobs/schema/person_schema.py:3-17
+PERSON_FULL_SCHEMA = StructType([
+    StructField("person_id", LongType(), True),
+    StructField("person_detail", StructType([
+        StructField("id", LongType(), True),
+        StructField("name", StringType(), True),
+        StructField("gender", IntegerType(), True),
+        StructField("also_known_as", ArrayType(StringType()), True),
+        StructField("biography", StringType(), True),
+        StructField("birthday", StringType(), True),
+        StructField("deathday", StringType(), True),
+        StructField("place_of_birth", StringType(), True),
+        StructField("known_for_department", StringType(), True),
+        StructField("popularity", DoubleType(), True),
+    ]), True)
+])
+```
+
+## Change Detection Schemas
+
+### Diff Schema
+
+Tracks additions and removals in array fields (casts, crews):
+
+<ParamField path="added" type="Array[Long]">
+  Array of entity IDs that were added (e.g., new cast members)
+</ParamField>
+
+<ParamField path="removed" type="Array[Long]">
+  Array of entity IDs that were removed
+</ParamField>
+
+```python
+# Source: batch_jobs/schema/diff_schema.py:3-6
+DIFF_SCHEMA = StructType([
+    StructField("added", ArrayType(LongType()), True),
+    StructField("removed", ArrayType(LongType()), True)
+])
+```
+
+<Info>
+  The diff schema is computed in the Silver layer by comparing hash values of array fields between the source data and the current state.
+</Info>
+
+### Hash Fields
+
+The Silver layer adds hash fields for change detection:
+
+<ParamField path="casts_total_hash" type="Long">
+  Hash of the entire casts_info array
+</ParamField>
+
+<ParamField path="crews_total_hash" type="Long">
+  Hash of the entire crews_info array
+</ParamField>
+
+<ParamField path="vector_info_hash" type="Long">
+  Hash of content fields (overview, description)
+</ParamField>
+
+<ParamField path="vector_info_hash_diff" type="Boolean">
+  Flag indicating if vector_info_hash changed
+</ParamField>
+
+<ParamField path="casts_diff" type="JSON">
+  JSON string containing added/removed cast member IDs
+</ParamField>
+
+<ParamField path="crews_diff" type="JSON">
+  JSON string containing added/removed crew member IDs
+</ParamField>
+
+## Vector Schema
+
+Schema for sparse vector embeddings used in semantic search:
+
+<ParamField path="indices" type="Array[Long]" required>
+  Indices of non-zero values in the sparse vector
+</ParamField>
+
+<ParamField path="values" type="Array[Float]" required>
+  Values at the corresponding indices
+</ParamField>
+
+```python
+# Source: batch_jobs/schema/vector_df_schema.py:3-6
+SPARSE_SCHEMA = StructType([
+    StructField("indices", ArrayType(LongType()), False),
+    StructField("values", ArrayType(FloatType()), False)
+])
+```
+
+<Note>
+  Sparse vectors are generated from overview text and stored in Pinecone for semantic similarity search.
+</Note>
+
+## Schema Evolution
+
+The platform supports schema evolution with these principles:
+
+<AccordionGroup>
+  <Accordion title="Adding Fields">
+    New optional fields can be added to any schema without breaking existing pipelines. All fields are nullable by default.
+  </Accordion>
+  
+  <Accordion title="Renaming Fields">
+    Field renames require updating all downstream transformations and should be done with a migration strategy.
+  </Accordion>
+  
+  <Accordion title="Removing Fields">
+    Deprecated fields should be marked as nullable first, then removed after ensuring no downstream dependencies.
+  </Accordion>
+  
+  <Accordion title="Changing Types">
+    Type changes require careful migration:
+    - Widening types (Int → Long) is safe
+    - Narrowing types requires data validation
+    - String ↔ Structured changes need custom migration
+  </Accordion>
+</AccordionGroup>
+
+## Validation Rules
+
+Schema validation occurs at multiple stages:
+
+### Bronze Layer Validation
+
+- **Required fields**: `data_type`, `timestamp` must be present
+- **Data type**: Must be one of: "movie", "tv_series", "person"
+- **JSON structure**: Must be valid JSON
+
+### Silver Layer Validation
+
+- **Schema conformance**: Data must match entity schema
+- **ID validation**: Primary IDs must be positive integers
+- **Array validation**: Nested arrays must contain valid structs
+- **Date validation**: Date strings must be valid YYYY-MM-DD format
+
+### Gold Layer Validation
+
+- **Referential integrity**: Foreign keys must reference existing entities
+- **Uniqueness**: Primary keys must be unique in target systems
+- **Type constraints**: Values must fit target system types (e.g., ClickHouse Int64)
+
+## Schema Locations in Code
+
+Quick reference for schema file locations:
+
+| Schema Type | File Path |
+|-------------|----------|
+| Movie | `batch_jobs/schema/movie_schema.py` |
+| TV Series | `batch_jobs/schema/tv_series_schema.py` |
+| Person | `batch_jobs/schema/person_schema.py` |
+| Diff | `batch_jobs/schema/diff_schema.py` |
+| Event | `stream_processor/schema/event_schema.py` |
+| Vector | `batch_jobs/schema/vector_df_schema.py` |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Data Model Overview" icon="sitemap" href="./overview">
+    Understand the high-level data model concepts
+  </Card>
+  <Card title="Medallion Architecture" icon="layer-group" href="./medallion-architecture">
+    Learn how schemas are used in each layer
+  </Card>
+</CardGroup>

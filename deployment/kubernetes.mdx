@@ -1,0 +1,528 @@
+---
+title: 'Kubernetes Deployment'
+description: 'Deploy the Entertainment Data Platform on Kubernetes for production workloads'
+icon: 'dharmachakra'
+---
+
+## Overview
+
+The Kubernetes deployment provides a production-grade, scalable infrastructure for the Entertainment Data Platform. Manifests are organized into logical layers for staged deployment.
+
+## Prerequisites
+
+<CardGroup cols={3}>
+  <Card title="Kubernetes Cluster" icon="server">
+    v1.20+ with kubectl configured
+  </Card>
+  <Card title="Storage Provisioner" icon="database">
+    Dynamic volume provisioning enabled
+  </Card>
+  <Card title="Resources" icon="microchip">
+    Minimum 8 CPU cores, 16GB RAM
+  </Card>
+</CardGroup>
+
+## Architecture
+
+The deployment is organized into three layers:
+
+```
+k8s/
+├── base/          # Namespace and storage class
+├── storage/       # Persistent data layer (MinIO, ClickHouse, Redis)
+└── services/      # Application services (Kafka, Ingestion, Stream Processor)
+```
+
+<Warning>
+  Manifests **must** be applied in order: base → storage → services. This ensures dependencies are met.
+</Warning>
+
+## Deployment Steps
+
+<Steps>
+  <Step title="Apply Base Infrastructure">
+    Create the namespace and configure storage policies.
+    
+    ```bash
+    kubectl apply -f k8s/base/01-namespace.yaml
+    kubectl apply -f k8s/base/02-storageclass.yaml
+    ```
+    
+    This creates the `data-platform` namespace and configures the storage class for persistent volumes.
+  </Step>
+
+  <Step title="Deploy Storage Layer">
+    Deploy persistent storage services in order.
+    
+    ```bash
+    kubectl apply -f k8s/storage/01-minio.yaml
+    kubectl apply -f k8s/storage/02-clickhouse.yaml
+    kubectl apply -f k8s/storage/03-redis.yaml
+    ```
+    
+    Wait for all pods to be ready before proceeding:
+    ```bash
+    kubectl get pods -n data-platform -w
+    ```
+  </Step>
+
+  <Step title="Deploy Application Services">
+    Deploy the application layer in order.
+    
+    ```bash
+    kubectl apply -f k8s/services/01-kafka.yaml
+    kubectl apply -f k8s/services/02-ingestion.yaml
+    kubectl apply -f k8s/services/03-stream-processor.yaml
+    ```
+    
+    The ingestion service must be ready before the stream processor starts consuming messages.
+  </Step>
+
+  <Step title="Verify Deployment">
+    Check that all services are running:
+    
+    ```bash
+    kubectl get pods -n data-platform
+    kubectl get svc -n data-platform
+    ```
+  </Step>
+</Steps>
+
+## Namespace Configuration
+
+<CodeGroup>
+```yaml 01-namespace.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: data-platform
+  labels:
+    name: data-platform
+```
+</CodeGroup>
+
+All platform resources are deployed in the `data-platform` namespace for isolation and management.
+
+## Storage Configuration
+
+### Storage Class
+
+<CodeGroup>
+```yaml 02-storageclass.yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: my-storage-class
+provisioner: k8s.io/minikube-hostpath
+reclaimPolicy: Delete
+```
+</CodeGroup>
+
+<Note>
+  The default provisioner is `k8s.io/minikube-hostpath` for local development. For production, change to your cloud provider's provisioner (e.g., `kubernetes.io/aws-ebs`, `kubernetes.io/gce-pd`).
+</Note>
+
+### Persistent Volume Claims
+
+| Service | PVC Name | Size | Purpose |
+|---------|----------|------|--------|
+| MinIO | `minio-pvc` | 5Gi | Object storage for Delta Lake |
+| ClickHouse | `clickhouse-pvc` | 5Gi | OLAP database storage |
+| Redis | `redis-pvc` | 1Gi | Cache and state data |
+
+## Service Configurations
+
+### MinIO Object Storage
+
+<CodeGroup>
+```yaml 01-minio.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio-deployment
+  namespace: data-platform
+spec:
+  template:
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio
+          env:
+            - name: MINIO_ROOT_USER
+              value: minio
+            - name: MINIO_ROOT_PASSWORD
+              value: minio123
+          args:
+            - server
+            - --console-address
+            - ":9001"
+            - /data
+          ports:
+            - containerPort: 9000
+            - containerPort: 9001
+          volumeMounts:
+            - mountPath: /data
+              name: minio-storage
+```
+</CodeGroup>
+
+**Services:**
+- `minio-internal` (ClusterIP): Internal service access on port 9000
+- `minio-external` (NodePort): External access on `30081` (API) and `30082` (Console)
+
+**Access:**
+```bash
+# Internal (from within cluster)
+http://minio-internal:9000
+
+# External (from outside cluster)
+http://<node-ip>:30081
+```
+
+### ClickHouse Database
+
+<CodeGroup>
+```yaml 02-clickhouse.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clickhouse-deployment
+  namespace: data-platform
+spec:
+  template:
+    spec:
+      containers:
+        - name: clickhouse
+          image: clickhouse/clickhouse-server
+          ports:
+            - containerPort: 8123  # HTTP
+            - containerPort: 9000  # Native
+          volumeMounts:
+            - mountPath: /var/lib/clickhouse
+              name: clickhouse-storage
+```
+</CodeGroup>
+
+**Services:**
+- `clickhouse-internal` (ClusterIP): Ports 8123 (HTTP), 9000 (Native)
+- `tabix-external` (NodePort): Web UI on `30080`
+
+### Redis Cache
+
+<CodeGroup>
+```yaml 03-redis.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-deployment
+  namespace: data-platform
+spec:
+  template:
+    spec:
+      containers:
+        - name: redis
+          image: redis:8.2.1-alpine
+          args:
+            - "--appendonly"
+            - "yes"
+          ports:
+            - containerPort: 6379
+          volumeMounts:
+            - mountPath: /data
+              name: redis-storage
+```
+</CodeGroup>
+
+**Service:**
+- `redis-internal` (ClusterIP): Port 6379
+
+**Features:**
+- AOF (Append-Only File) persistence enabled
+- Data persisted to PVC
+
+### Kafka Message Broker
+
+<CodeGroup>
+```yaml 01-kafka.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-deployment
+  namespace: data-platform
+spec:
+  template:
+    spec:
+      containers:
+        - name: kafka
+          image: apache/kafka:latest
+          env:
+            - name: KAFKA_BROKER_ID
+              value: "1"
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: "PLAINTEXT://kafka-internal:29092,PLAINTEXT_HOST://kafka-internal:9092"
+            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+              value: "true"
+            - name: KAFKA_NUM_PARTITIONS
+              value: "3"
+```
+</CodeGroup>
+
+**Service:**
+- `kafka-internal` (ClusterIP): Port 9092
+
+**Configuration:**
+- KRaft mode (no ZooKeeper)
+- Auto-creates topics
+- 3 partitions per topic
+- Single broker setup
+
+### Ingestion Service
+
+<CodeGroup>
+```yaml 02-ingestion.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingestion
+  namespace: data-platform
+spec:
+  template:
+    spec:
+      containers:
+        - name: ingestion
+          image: khoa2k4/entertainment_data_platform:ingestion_v1
+          imagePullPolicy: Always
+          env:
+            - name: APP_ENV
+              value: prod
+          resources:
+            requests:
+              memory: "2Gi"
+              cpu: "1"
+            limits:
+              memory: "3Gi"
+              cpu: "2"
+```
+</CodeGroup>
+
+**Purpose**: Fetches data from TMDB API and produces to Kafka topics
+
+### Stream Processor
+
+<CodeGroup>
+```yaml 03-stream-processor.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stream-processor
+  namespace: data-platform
+spec:
+  template:
+    spec:
+      containers:
+        - name: stream-processor
+          image: khoa2k4/entertainment_data_platform:stream_processor_v1
+          imagePullPolicy: Always
+          env:
+            - name: APP_ENV
+              value: prod
+          resources:
+            requests:
+              memory: "2Gi"
+              cpu: "1"
+            limits:
+              memory: "3Gi"
+              cpu: "2"
+```
+</CodeGroup>
+
+**Purpose**: Consumes from Kafka, processes with Spark, writes to Delta Lake
+
+## Scaling Considerations
+
+### Horizontal Scaling
+
+Scale application services based on load:
+
+```bash
+# Scale ingestion pods
+kubectl scale deployment ingestion -n data-platform --replicas=3
+
+# Scale stream processor
+kubectl scale deployment stream-processor -n data-platform --replicas=2
+```
+
+<Warning>
+  Kafka is currently configured as a single-broker setup. For production, deploy a multi-broker cluster with replication.
+</Warning>
+
+### Resource Limits
+
+Default resource allocation:
+
+| Service | CPU Request | CPU Limit | Memory Request | Memory Limit |
+|---------|-------------|-----------|----------------|-------------|
+| Ingestion | 1 core | 2 cores | 2Gi | 3Gi |
+| Stream Processor | 1 core | 2 cores | 2Gi | 3Gi |
+
+Adjust based on workload:
+
+```yaml
+resources:
+  requests:
+    memory: "4Gi"
+    cpu: "2"
+  limits:
+    memory: "8Gi"
+    cpu: "4"
+```
+
+### Storage Scaling
+
+Increase PVC size:
+
+```bash
+# Edit PVC (if storage class supports expansion)
+kubectl edit pvc minio-pvc -n data-platform
+```
+
+Update the `storage` field:
+```yaml
+spec:
+  resources:
+    requests:
+      storage: 10Gi
+```
+
+## Monitoring and Logging
+
+### Check Pod Status
+
+```bash
+# All pods
+kubectl get pods -n data-platform
+
+# Watch for changes
+kubectl get pods -n data-platform -w
+
+# Detailed pod info
+kubectl describe pod <pod-name> -n data-platform
+```
+
+### View Logs
+
+<CodeGroup>
+```bash Stream Logs
+kubectl logs -f deployment/stream-processor -n data-platform
+```
+
+```bash Previous Container
+kubectl logs <pod-name> -n data-platform --previous
+```
+
+```bash Tail Last 100 Lines
+kubectl logs deployment/ingestion -n data-platform --tail=100
+```
+</CodeGroup>
+
+### Access Services
+
+```bash
+# Port forward MinIO console
+kubectl port-forward svc/minio-internal 9001:9001 -n data-platform
+
+# Port forward ClickHouse
+kubectl port-forward svc/clickhouse-internal 8123:8123 -n data-platform
+
+# Execute commands in pod
+kubectl exec -it <pod-name> -n data-platform -- /bin/bash
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Pods stuck in Pending state">
+    **Cause**: Insufficient resources or storage provisioning issues
+    
+    **Solution**:
+    ```bash
+    kubectl describe pod <pod-name> -n data-platform
+    ```
+    
+    Check for:
+    - Insufficient CPU/memory
+    - PVC not bound (check storage class and provisioner)
+    - Node selector constraints
+  </Accordion>
+
+  <Accordion title="ImagePullBackOff errors">
+    **Cause**: Cannot pull container images
+    
+    **Solution**:
+    1. Verify image exists: `khoa2k4/entertainment_data_platform:ingestion_v1`
+    2. Check image pull policy (uses `Always`)
+    3. Add image pull secrets if registry is private
+  </Accordion>
+
+  <Accordion title="Service connectivity issues">
+    **Cause**: DNS or network policy problems
+    
+    **Solution**:
+    1. Use fully qualified service names:
+       ```
+       kafka-internal.data-platform.svc.cluster.local:9092
+       ```
+    2. Check service exists:
+       ```bash
+       kubectl get svc -n data-platform
+       ```
+    3. Test DNS resolution:
+       ```bash
+       kubectl run -it --rm debug --image=busybox --restart=Never -- nslookup kafka-internal.data-platform
+       ```
+  </Accordion>
+
+  <Accordion title="Storage persistence issues">
+    **Cause**: PVC not retaining data
+    
+    **Solution**:
+    1. Check reclaim policy (currently `Delete` - data is lost when PVC is deleted)
+    2. Change to `Retain` for production:
+       ```yaml
+       reclaimPolicy: Retain
+       ```
+    3. Verify PVC is bound:
+       ```bash
+       kubectl get pvc -n data-platform
+       ```
+  </Accordion>
+</AccordionGroup>
+
+## Cleanup
+
+Remove all resources:
+
+```bash
+# Delete all resources in namespace
+kubectl delete namespace data-platform
+
+# Or delete layer by layer (reverse order)
+kubectl delete -f k8s/services/
+kubectl delete -f k8s/storage/
+kubectl delete -f k8s/base/
+```
+
+<Warning>
+  With `reclaimPolicy: Delete`, this will permanently delete all data in PVCs.
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="gear" href="/deployment/configuration">
+    Configure environment variables and settings
+  </Card>
+  <Card title="Monitoring" icon="chart-line" href="/operations/monitoring">
+    Set up monitoring and alerting
+  </Card>
+</CardGroup>

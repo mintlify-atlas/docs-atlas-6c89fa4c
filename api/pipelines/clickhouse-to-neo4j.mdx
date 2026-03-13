@@ -1,0 +1,503 @@
+---
+title: 'ClickHouse to Neo4j Pipeline'
+description: 'Create graph nodes and relationships in Neo4j from ClickHouse analytical data'
+icon: 'diagram-project'
+---
+
+## Overview
+
+The ClickHouse to Neo4j pipeline builds a knowledge graph by reading data from ClickHouse and writing nodes and relationships to Neo4j. It creates nodes for movies, TV series, and persons, then establishes relationships (ACTED_IN, WORKS_ON) based on cast and crew information.
+
+## Module Path
+
+```python
+from batch_jobs.pipelines.silver_gold.clickhouse_to_neo4j import write_clickhouse_to_neo4j
+```
+
+## Purpose
+
+- **Node Creation**: Create Movie, TV_Series, and Person nodes in Neo4j
+- **Relationship Management**: Establish ACTED_IN and WORKS_ON relationships
+- **Incremental Updates**: Use diff columns to add/remove relationships efficiently
+- **Graph Constraints**: Apply uniqueness constraints on node keys
+- **Change Tracking**: Process only the latest batch version from ClickHouse
+
+## Data Flow
+
+<CardGroup cols={2}>
+  <Card title="Input" icon="database">
+    **ClickHouse Tables**
+    - `movie`, `movie_cast`, `movie_crew`
+    - `tv_series`, `tv_series_cast`, `tv_series_crew`
+    - `person`
+  </Card>
+  <Card title="Output" icon="diagram-project">
+    **Neo4j Graph**
+    - **Nodes**: Movie, TV_Series, Person
+    - **Relationships**: ACTED_IN, WORKS_ON
+  </Card>
+</CardGroup>
+
+## Configuration Parameters
+
+<ParamField path="spark.app_name_3" type="string" required>
+  Spark application name for this pipeline
+</ParamField>
+
+<ParamField path="storage.redis.keys.dedup_batch_version" type="string" required>
+  Redis key prefix for tracking batch versions
+</ParamField>
+
+<ParamField path="storage.clickhouse.host" type="string" required>
+  ClickHouse server hostname
+</ParamField>
+
+<ParamField path="storage.clickhouse.port" type="integer" required>
+  ClickHouse native protocol port (default: 9000)
+</ParamField>
+
+<ParamField path="storage.neo4j.uri" type="string" required>
+  Neo4j Bolt URI (e.g., `bolt://localhost:7687`)
+</ParamField>
+
+<ParamField path="storage.neo4j.username" type="string" required>
+  Neo4j authentication username
+</ParamField>
+
+<ParamField path="storage.neo4j.password" type="string" required>
+  Neo4j authentication password
+</ParamField>
+
+## Function Signatures
+
+### `write_clickhouse_to_neo4j()`
+
+Main entry point for the ClickHouse to Neo4j pipeline.
+
+```python
+def write_clickhouse_to_neo4j(transform_map=TRANSFORM_MAP):
+    """
+    Pipeline to write to Neo4j from ClickHouse
+    """
+```
+
+<ParamField path="transform_map" type="dict" default="TRANSFORM_MAP">
+  Configuration mapping for nodes and relationships
+</ParamField>
+
+**Returns**: None (writes to Neo4j)
+
+**Process Flow**:
+1. Load settings and initialize logging
+2. Connect to Redis for version tracking
+3. Create Spark session with ClickHouse and Neo4j connectors
+4. Process nodes: Create Movie, TV_Series, and Person nodes
+5. Process relationships: Create ACTED_IN and WORKS_ON relationships
+
+### `process_nodes()`
+
+Creates nodes in Neo4j from ClickHouse data.
+
+```python
+def process_nodes(
+    transform_map: dict,
+    settings: Settings,
+    redis_client: RedisClient,
+    clickhouse_reader: ClickHouseReader,
+    neo4j_writer: Neo4jWriter
+)
+```
+
+<ParamField path="transform_map" type="dict" required>
+  Node configuration from `TRANSFORM_MAP["nodes"]`
+</ParamField>
+
+<ParamField path="settings" type="Settings" required>
+  Configuration settings loaded from YAML
+</ParamField>
+
+<ParamField path="redis_client" type="RedisClient" required>
+  Redis client for version tracking
+</ParamField>
+
+<ParamField path="clickhouse_reader" type="ClickHouseReader" required>
+  Reader for ClickHouse tables
+</ParamField>
+
+<ParamField path="neo4j_writer" type="Neo4jWriter" required>
+  Writer for Neo4j using Spark Neo4j connector
+</ParamField>
+
+### `process_relationships()`
+
+Creates relationships in Neo4j by joining ClickHouse tables.
+
+```python
+def process_relationships(
+    transform_map: dict,
+    settings: Settings,
+    redis_client: RedisClient,
+    clickhouse_reader: ClickHouseReader,
+    neo4j_writer: Neo4jWriter
+)
+```
+
+**Process**:
+1. Read main table (movie/tv_series) and related table (cast/crew)
+2. Parse diff column to extract added/removed IDs
+3. Join tables to get full relationship data
+4. Write relationships to Neo4j with properties
+
+### `join_to_get_relationship()`
+
+Helper function to create relationship DataFrames.
+
+```python
+def join_to_get_relationship(
+    left_df: DataFrame,
+    right_df: DataFrame,
+    key_cols: list[str],
+    diff_col: str,
+    action_col: str,
+    id_col_in_diff: str,
+    relationship_properties: list[str]
+) -> DataFrame
+```
+
+<ParamField path="left_df" type="DataFrame" required>
+  Main DataFrame with diff column (e.g., movie table)
+</ParamField>
+
+<ParamField path="right_df" type="DataFrame" required>
+  Related DataFrame with IDs (e.g., movie_cast table)
+</ParamField>
+
+<ParamField path="key_cols" type="list[str]" required>
+  Columns to join on (e.g., `["movie_id"]`)
+</ParamField>
+
+<ParamField path="diff_col" type="string" required>
+  Column containing diff JSON (e.g., `"casts_diff"`)
+</ParamField>
+
+<ParamField path="action_col" type="string" required>
+  Action to extract: `"added"` or `"removed"`
+</ParamField>
+
+<ParamField path="id_col_in_diff" type="string" required>
+  ID field name in diff array (e.g., `"person_id"`)
+</ParamField>
+
+<ParamField path="relationship_properties" type="list[str]" required>
+  Properties to include in the relationship
+</ParamField>
+
+## Transform Map Configuration
+
+### Nodes Configuration
+
+```python
+TRANSFORM_MAP = {
+    "nodes": {
+        "movie": {
+            "label": "Movie",
+            "keys": ["movie_id"],
+            "select_cols": [
+                "movie_id", "original_title", "overview", "popularity",
+                "release_date", "tagline", "vote_average", "vote_count",
+                "batch_version"
+            ],
+        },
+        "person": {
+            "label": "Person",
+            "keys": ["person_id"],
+            "select_cols": [
+                "person_id", "name", "gender", "also_known_as",
+                "biography", "birthday", "deathday", "place_of_birth",
+                "known_for_department", "batch_version"
+            ],
+        },
+        "tv_series": {
+            "label": "TV_Series",
+            "keys": ["tv_series_id"],
+            "select_cols": [
+                "tv_series_id", "overview", "popularity", "first_air_date",
+                "tagline", "vote_average", "vote_count", "status",
+                "number_of_seasons", "batch_version"
+            ],
+        },
+    },
+    # ...
+}
+```
+
+### Relationships Configuration
+
+```python
+TRANSFORM_MAP = {
+    # ...
+    "relationships": [
+        {
+            "ACTED_IN": {
+                "tables": [["movie", "movie_cast"], ["tv_series", "tv_series_cast"]],
+                "diff_col": ["casts_diff", "casts_diff"],
+                "action_col": [["added", "removed"], ["added", "removed"]],
+                "id_col_in_diff": ["person_id", "person_id"],
+                "repartition_cols": [["movie_id"], ["tv_series_id"]],
+                "source_label": ["Person", "Person"],
+                "source_keys": [["person_id"], ["person_id"]],
+                "target_label": ["Movie", "TV_Series"],
+                "target_keys": [["movie_id"], ["tv_series_id"]],
+                "relationship_properties": [
+                    ["cast_id", "character", "credit_id", "known_for_department", "batch_version"],
+                    ["cast_id", "character", "credit_id", "known_for_department", "batch_version"]
+                ],
+                "partition_num": 1,
+            }
+        },
+        {
+            "WORKS_ON": {
+                "tables": [["movie", "movie_crew"], ["tv_series", "tv_series_crew"]],
+                "diff_col": ["crews_diff", "crews_diff"],
+                "action_col": [["added", "removed"], ["added", "removed"]],
+                "id_col_in_diff": ["person_id", "person_id"],
+                "relationship_properties": [
+                    ["department", "job", "known_for_department", "batch_version"],
+                    ["department", "job", "known_for_department", "batch_version"]
+                ],
+                # ...
+            }
+        },
+    ]
+}
+```
+
+## Usage Examples
+
+<CodeGroup>
+```python Direct Execution
+from batch_jobs.pipelines.silver_gold.clickhouse_to_neo4j import write_clickhouse_to_neo4j
+
+if __name__ == "__main__":
+    write_clickhouse_to_neo4j()
+```
+
+```python Airflow DAG
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from batch_jobs.pipelines.silver_gold.clickhouse_to_neo4j import write_clickhouse_to_neo4j
+from datetime import datetime
+
+with DAG(
+    dag_id='clickhouse_to_neo4j_pipeline',
+    start_date=datetime(2024, 1, 1),
+    schedule_interval='@daily',
+    catchup=False
+) as dag:
+    
+    graph_task = PythonOperator(
+        task_id='write_clickhouse_to_neo4j',
+        python_callable=write_clickhouse_to_neo4j
+    )
+```
+
+```python Custom Transform Map
+from batch_jobs.pipelines.silver_gold.clickhouse_to_neo4j import write_clickhouse_to_neo4j
+
+# Define custom node and relationship configuration
+custom_transform_map = {
+    "nodes": {
+        "movie": {
+            "label": "Movie",
+            "keys": ["movie_id"],
+            "select_cols": ["movie_id", "original_title", "overview"]
+        }
+    },
+    "relationships": [
+        # Custom relationship configurations
+    ]
+}
+
+write_clickhouse_to_neo4j(transform_map=custom_transform_map)
+```
+</CodeGroup>
+
+## Neo4j Graph Schema
+
+### Nodes
+
+**Movie Node**
+```cypher
+(:Movie {
+  movie_id: 550,
+  original_title: "Fight Club",
+  overview: "A ticking-time-bomb...",
+  popularity: 63.869,
+  release_date: "1999-10-15",
+  tagline: "Mischief. Mayhem. Soap.",
+  vote_average: 8.433,
+  vote_count: 28042,
+  batch_version: 42
+})
+```
+
+**Person Node**
+```cypher
+(:Person {
+  person_id: 287,
+  name: "Brad Pitt",
+  gender: 2,
+  also_known_as: ["William Bradley Pitt", "Бред Пітт"],
+  biography: "William Bradley 'Brad' Pitt...",
+  birthday: "1963-12-18",
+  place_of_birth: "Shawnee, Oklahoma, USA",
+  known_for_department: "Acting",
+  batch_version: 42
+})
+```
+
+**TV_Series Node**
+```cypher
+(:TV_Series {
+  tv_series_id: 1396,
+  overview: "Breaking Bad tells the story...",
+  popularity: 461.938,
+  first_air_date: "2008-01-20",
+  vote_average: 8.9,
+  vote_count: 13237,
+  status: "Ended",
+  number_of_seasons: 5,
+  batch_version: 42
+})
+```
+
+### Relationships
+
+**ACTED_IN Relationship**
+```cypher
+(:Person {person_id: 287})-[:ACTED_IN {
+  cast_id: 4,
+  character: "Tyler Durden",
+  credit_id: "52fe4250c3a36847f80149f3",
+  known_for_department: "Acting",
+  batch_version: 42
+}]->(:Movie {movie_id: 550})
+```
+
+**WORKS_ON Relationship**
+```cypher
+(:Person {person_id: 7467})-[:WORKS_ON {
+  department: "Directing",
+  job: "Director",
+  known_for_department: "Directing",
+  batch_version: 42
+}]->(:Movie {movie_id: 550})
+```
+
+## Diff Column Processing
+
+The pipeline processes diff columns to efficiently update relationships:
+
+**Example diff column**:
+```json
+{
+  "added": [123, 456, 789],
+  "removed": [111, 222]
+}
+```
+
+**Processing logic**:
+1. Parse JSON diff column using `from_json()`
+2. Explode `added` array to get list of IDs to add
+3. Explode `removed` array to get list of IDs to remove
+4. Join with cast/crew table to get full relationship data
+5. Write relationships to Neo4j (Neo4j connector handles merges)
+
+## Cypher Query Examples
+
+After running the pipeline, you can query the graph:
+
+<CodeGroup>
+```cypher Find Actors in a Movie
+MATCH (p:Person)-[r:ACTED_IN]->(m:Movie {movie_id: 550})
+RETURN p.name, r.character
+ORDER BY r.cast_id
+```
+
+```cypher Find Director's Movies
+MATCH (p:Person)-[r:WORKS_ON]->(m:Movie)
+WHERE r.job = 'Director'
+RETURN p.name, m.original_title, m.release_date
+ORDER BY m.release_date DESC
+```
+
+```cypher Actor Collaboration Network
+MATCH (p1:Person)-[:ACTED_IN]->(m:Movie)<-[:ACTED_IN]-(p2:Person)
+WHERE p1.person_id < p2.person_id
+RETURN p1.name, p2.name, COUNT(m) AS collaborations
+ORDER BY collaborations DESC
+LIMIT 10
+```
+
+```cypher TV Series Cast
+MATCH (p:Person)-[r:ACTED_IN]->(t:TV_Series {tv_series_id: 1396})
+RETURN p.name, r.character
+ORDER BY p.name
+```
+</CodeGroup>
+
+## Performance Considerations
+
+- **Batch Version Filtering**: Only processes latest batch from ClickHouse
+- **Repartitioning**: Uses `repartition_cols` to distribute write load
+- **Constraints**: Creates uniqueness constraints on node keys for efficient merges
+- **Parallel Processing**: Can process multiple data types and relationships in parallel
+- **Spark-Neo4j Connector**: Uses optimized connector for bulk writes
+
+## Error Handling
+
+<Note>
+  The Neo4j writer uses the Spark Neo4j connector's `MERGE` mode by default, which:
+  - Creates nodes if they don't exist
+  - Updates nodes if they already exist
+  - Prevents duplicate nodes based on key constraints
+</Note>
+
+<Warning>
+  Ensure Neo4j has sufficient memory for large batch writes. Consider adjusting:
+  - `dbms.memory.heap.max_size`
+  - `dbms.memory.pagecache.size`
+</Warning>
+
+## Dependencies
+
+- **PySpark**: Data processing framework
+- **ClickHouse**: Source OLAP database
+- **Neo4j**: Target graph database
+- **Redis**: Version tracking
+- **Spark Neo4j Connector**: Efficient graph writes
+
+## Logging
+
+Key logged events:
+
+```python
+logger.info(f"Processing table: {table_name}")
+logger.info(f"Last version for {version_key} found in Redis: {last_version}")
+logger.info(f"Processing relationship: {relationship}")
+logger.info(f"Finish processing relationship: {relationship}")
+```
+
+## Related Pipelines
+
+<CardGroup cols={3}>
+  <Card title="Silver to ClickHouse" icon="arrow-left" href="/api/pipelines/silver-to-clickhouse">
+    Previous: Load data into ClickHouse
+  </Card>
+  <Card title="ClickHouse to Pinecone" icon="diagram-next" href="/api/pipelines/clickhouse-to-pinecone">
+    Parallel: Generate vector embeddings
+  </Card>
+  <Card title="Bronze to Silver" icon="arrow-left" href="/api/pipelines/bronze-to-silver">
+    Start: Data deduplication
+  </Card>
+</CardGroup>

@@ -1,0 +1,446 @@
+---
+title: 'Silver to ClickHouse Pipeline'
+description: 'Transform Silver layer data and load into ClickHouse OLAP database'
+icon: 'database'
+---
+
+## Overview
+
+The Silver to ClickHouse pipeline reads deduplicated data from the Silver layer in Delta Lake and writes it to ClickHouse tables. It transforms nested Spark DataFrames into flat ClickHouse schemas, explodes array columns for cast and crew data, and preserves diff columns for downstream change tracking.
+
+## Module Path
+
+```python
+from batch_jobs.pipelines.silver_silver.minio_to_clickhouse import write_minio_to_clickhouse
+```
+
+## Purpose
+
+- **Schema Transformation**: Convert nested Spark schemas to flat ClickHouse tables
+- **Array Explosion**: Create separate cast and crew tables from nested arrays
+- **Batch Processing**: Load only the latest batch version from Silver layer
+- **Table Initialization**: Automatically create ClickHouse tables if they don't exist
+- **Change Tracking**: Preserve diff columns for Neo4j relationship processing
+
+## Data Flow
+
+<CardGroup cols={2}>
+  <Card title="Input" icon="table">
+    **Silver Layer** (Delta Lake on MinIO)
+    - Deduplicated structured data
+    - Parsed schemas with hash columns
+    - Batch version tracked in Redis
+  </Card>
+  <Card title="Output" icon="database">
+    **ClickHouse Tables**
+    - `movie`, `movie_cast`, `movie_crew`
+    - `tv_series`, `tv_series_cast`, `tv_series_crew`
+    - `person`
+  </Card>
+</CardGroup>
+
+## Configuration Parameters
+
+The pipeline reads configuration from `settings.yaml`:
+
+<ParamField path="spark.app_name_2" type="string" required>
+  Spark application name for this pipeline
+</ParamField>
+
+<ParamField path="storage.delta_lake.tables.silver_layer" type="string" required>
+  S3/MinIO path to Silver layer Delta tables
+</ParamField>
+
+<ParamField path="storage.delta_lake.target_name_folder" type="array" required>
+  List of tuples: `[(data_type, folder_name)]`
+</ParamField>
+
+<ParamField path="storage.redis.keys.dedup_batch_version" type="string" required>
+  Redis key prefix for tracking batch versions
+</ParamField>
+
+<ParamField path="storage.clickhouse.host" type="string" required>
+  ClickHouse server hostname
+</ParamField>
+
+<ParamField path="storage.clickhouse.port" type="integer" required>
+  ClickHouse native protocol port (default: 9000)
+</ParamField>
+
+<ParamField path="storage.clickhouse.database" type="string" required>
+  ClickHouse database name
+</ParamField>
+
+## Function Signatures
+
+### `write_minio_to_clickhouse()`
+
+Main entry point for the Silver to ClickHouse pipeline.
+
+```python
+def write_minio_to_clickhouse():
+    """
+    Pipeline to write to Clickhouse from Delta Lake Minio (After dedup timestamp)
+    """
+```
+
+**Parameters**: None (reads from configuration)
+
+**Returns**: None (writes to ClickHouse)
+
+**Process Flow**:
+1. Load settings and initialize logging
+2. Initialize ClickHouse tables (create if not exist)
+3. Create Spark session with MinIO and ClickHouse connectors
+4. For each data type (movie, tv_series, person):
+   - Read batch version from Redis
+   - Filter Silver layer data by batch version
+   - Apply transformation functions to prepare ClickHouse schemas
+   - Write to ClickHouse tables using native protocol
+
+### `process_table()`
+
+Processes data for all data types and writes to ClickHouse.
+
+```python
+def process_table(
+    settings: Settings,
+    redis_client: RedisClient,
+    delta_minio_reader: DeltaMinioReader,
+    clickhouse_writer: ClickHouseNativeWriter,
+    transform_map: dict = TRANSFORM_MAP
+)
+```
+
+<ParamField path="settings" type="Settings" required>
+  Configuration settings loaded from YAML
+</ParamField>
+
+<ParamField path="redis_client" type="RedisClient" required>
+  Redis client for version tracking
+</ParamField>
+
+<ParamField path="delta_minio_reader" type="DeltaMinioReader" required>
+  Reader for Delta Lake tables on MinIO
+</ParamField>
+
+<ParamField path="clickhouse_writer" type="ClickHouseNativeWriter" required>
+  Writer for ClickHouse using native protocol
+</ParamField>
+
+<ParamField path="transform_map" type="dict" default="TRANSFORM_MAP">
+  Mapping of data types to transformation functions
+</ParamField>
+
+## Transform Map Configuration
+
+The `TRANSFORM_MAP` defines which ClickHouse tables to create for each data type:
+
+```python
+TRANSFORM_MAP = {
+    "movie": [
+        {"table_name": "movie", "transform_func": prepare_table_movie},
+        {"table_name": "movie_cast", "transform_func": prepare_table_movie_cast},
+        {"table_name": "movie_crew", "transform_func": prepare_table_movie_crew},
+    ],
+    "person": [
+        {"table_name": "person", "transform_func": prepare_table_person}
+    ],
+    "tv_series": [
+        {"table_name": "tv_series", "transform_func": prepare_table_tv_series},
+        {"table_name": "tv_series_cast", "transform_func": prepare_table_tv_series_cast},
+        {"table_name": "tv_series_crew", "transform_func": prepare_table_tv_series_crew},
+    ]
+}
+```
+
+## Transform Functions
+
+### `prepare_table_movie()`
+
+Transforms movie data to ClickHouse schema.
+
+```python
+def prepare_table_movie(df: DataFrame) -> DataFrame:
+    """
+    Convert DataFrame movie to ClickHouse table movie format
+    """
+```
+
+**Output Columns**:
+- `movie_id` (Long)
+- `original_title` (String)
+- `overview` (String)
+- `popularity` (Double)
+- `release_date` (Date)
+- `vote_average` (Double)
+- `vote_count` (Long)
+- `genres` (JSON)
+- `belongs_to_collection` (JSON)
+- `production_countries` (JSON)
+- `vector_info_hash` (Long)
+- `casts_total_hash` (Long)
+- `crews_total_hash` (Long)
+- `vector_info_hash_diff` (Boolean)
+- `casts_diff` (JSON)
+- `crews_diff` (JSON)
+- `batch_version` (Long)
+
+### `prepare_table_movie_cast()`
+
+Explodes cast array into individual rows.
+
+```python
+def prepare_table_movie_cast(df: DataFrame) -> DataFrame:
+    """
+    Convert DataFrame movie to ClickHouse table movie_cast format
+    """
+```
+
+**Process**:
+1. Explode `parsed_raw_df.casts_info` array
+2. Extract cast member fields
+3. Create one row per cast member per movie
+
+**Output Columns**:
+- `movie_id` (Long)
+- `cast_id` (Long)
+- `person_id` (Long)
+- `character` (String)
+- `credit_id` (String)
+- `known_for_department` (String)
+- `batch_version` (Long)
+
+### `prepare_table_movie_crew()`
+
+Explodes crew array into individual rows.
+
+```python
+def prepare_table_movie_crew(df: DataFrame) -> DataFrame:
+    """
+    Convert DataFrame movie to ClickHouse table movie_crew format
+    """
+```
+
+**Output Columns**:
+- `movie_id` (Long)
+- `person_id` (Long)
+- `department` (String)
+- `job` (String)
+- `known_for_department` (String)
+- `batch_version` (Long)
+
+### TV Series Transform Functions
+
+Similar functions exist for TV series:
+- `prepare_table_tv_series()` - Main TV series table
+- `prepare_table_tv_series_cast()` - Cast members
+- `prepare_table_tv_series_crew()` - Crew members
+
+### `prepare_table_person()`
+
+Transforms person data to ClickHouse schema.
+
+```python
+def prepare_table_person(df: DataFrame) -> DataFrame:
+    """
+    Convert DataFrame person to ClickHouse table person format
+    """
+```
+
+**Output Columns**:
+- `person_id` (Long)
+- `name` (String)
+- `gender` (Integer)
+- `also_known_as` (Array of Strings)
+- `biography` (String)
+- `birthday` (Date)
+- `deathday` (Date)
+- `place_of_birth` (String)
+- `known_for_department` (String)
+- `batch_version` (Long)
+
+## Usage Examples
+
+<CodeGroup>
+```python Direct Execution
+# Run the pipeline directly
+from batch_jobs.pipelines.silver_silver.minio_to_clickhouse import write_minio_to_clickhouse
+
+if __name__ == "__main__":
+    write_minio_to_clickhouse()
+```
+
+```python Airflow DAG
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from batch_jobs.pipelines.silver_silver.minio_to_clickhouse import write_minio_to_clickhouse
+from datetime import datetime
+
+with DAG(
+    dag_id='silver_to_clickhouse_pipeline',
+    start_date=datetime(2024, 1, 1),
+    schedule_interval='@daily',
+    catchup=False
+) as dag:
+    
+    load_task = PythonOperator(
+        task_id='write_minio_to_clickhouse',
+        python_callable=write_minio_to_clickhouse
+    )
+```
+
+```python Custom Processing
+from batch_jobs.config.settings import load_settings
+from batch_jobs.io.readers.delta_minio_reader import DeltaMinioReader
+from batch_jobs.io.writers.clickhouse_native_writer import ClickHouseNativeWriter
+from batch_jobs.run_time.redis.redis_client import RedisClient
+from batch_jobs.pipelines.silver_silver.minio_to_clickhouse import process_table
+from pyspark.sql import SparkSession
+
+# Setup
+settings = load_settings()
+redis_client = RedisClient()
+spark = SparkSession.builder.appName("CustomClickHouseLoader").getOrCreate()
+
+# Initialize readers and writers
+delta_reader = DeltaMinioReader(spark)
+clickhouse_writer = ClickHouseNativeWriter(spark)
+
+# Process all tables
+process_table(
+    settings=settings,
+    redis_client=redis_client,
+    delta_minio_reader=delta_reader,
+    clickhouse_writer=clickhouse_writer
+)
+```
+</CodeGroup>
+
+## ClickHouse Table Schemas
+
+### Movie Table
+```sql
+CREATE TABLE movie (
+    movie_id Int64,
+    original_title String,
+    overview String,
+    popularity Float64,
+    release_date Date,
+    vote_average Float64,
+    vote_count Int64,
+    genres String,  -- JSON
+    belongs_to_collection String,  -- JSON
+    production_countries String,  -- JSON
+    vector_info_hash Int64,
+    casts_total_hash Int64,
+    crews_total_hash Int64,
+    vector_info_hash_diff Bool,
+    casts_diff String,  -- JSON with added/removed arrays
+    crews_diff String,  -- JSON with added/removed arrays
+    batch_version Int64
+) ENGINE = MergeTree()
+ORDER BY movie_id;
+```
+
+### Movie Cast Table
+```sql
+CREATE TABLE movie_cast (
+    movie_id Int64,
+    cast_id Int64,
+    person_id Int64,
+    character String,
+    credit_id String,
+    known_for_department String,
+    batch_version Int64
+) ENGINE = MergeTree()
+ORDER BY (movie_id, cast_id);
+```
+
+### Person Table
+```sql
+CREATE TABLE person (
+    person_id Int64,
+    name String,
+    gender Int32,
+    also_known_as Array(String),
+    biography String,
+    birthday Date,
+    deathday Nullable(Date),
+    place_of_birth String,
+    known_for_department String,
+    batch_version Int64
+) ENGINE = MergeTree()
+ORDER BY person_id;
+```
+
+## Error Handling
+
+<Warning>
+  **Critical Error**: If the batch version is not found in Redis, the pipeline will abort.
+  
+  This is a safety measure to prevent data inconsistency. The Bronze to Silver pipeline must run successfully before this pipeline.
+</Warning>
+
+```python
+if not last_version:
+    logger.error(f"CRITICAL: Last version for {version_key} NOT found in Redis. Aborting pipeline.")
+    sys.exit(1)
+```
+
+<Note>
+  If a data type is not found in the transform map, the pipeline logs a warning and skips that data type.
+</Note>
+
+## Diff Column Format
+
+The `casts_diff` and `crews_diff` columns contain JSON with this structure:
+
+```json
+{
+  "added": [123, 456, 789],      // IDs added in this batch
+  "removed": [111, 222]          // IDs removed in this batch
+}
+```
+
+These diff columns are crucial for the [ClickHouse to Neo4j pipeline](/api/pipelines/clickhouse-to-neo4j) to efficiently update graph relationships.
+
+## Performance Considerations
+
+- **Native Protocol**: Uses ClickHouse native protocol (port 9000) for faster bulk inserts
+- **Batch Version Filtering**: Only processes the latest batch to avoid full table scans
+- **Parallel Writes**: Can write to multiple ClickHouse tables concurrently
+- **Schema Optimization**: Flat schemas optimized for OLAP queries
+
+## Dependencies
+
+- **PySpark**: Data processing framework
+- **Delta Lake**: Read Silver layer data
+- **ClickHouse**: OLAP database for analytics
+- **Redis**: Version tracking
+- **MinIO**: S3-compatible object storage
+
+## Logging
+
+Key logged events:
+
+```python
+logger.info(f"Processing data type: {data_type}")
+logger.info(f"Last version for {version_key} found in Redis: {last_version}")
+logger.info(f"Processing transform for Clickhouse table: {table_name}")
+logger.info(f"Finish processing transform for Clickhouse table: {table_name}")
+```
+
+## Related Pipelines
+
+<CardGroup cols={3}>
+  <Card title="Bronze to Silver" icon="arrow-left" href="/api/pipelines/bronze-to-silver">
+    Previous: Deduplicate and parse raw data
+  </Card>
+  <Card title="ClickHouse to Neo4j" icon="arrow-right" href="/api/pipelines/clickhouse-to-neo4j">
+    Next: Create graph relationships
+  </Card>
+  <Card title="ClickHouse to Pinecone" icon="arrow-right" href="/api/pipelines/clickhouse-to-pinecone">
+    Next: Generate vector embeddings
+  </Card>
+</CardGroup>

@@ -1,0 +1,430 @@
+---
+title: Monitoring
+description: Monitor the health and performance of your Entertainment Data Platform
+---
+
+## Overview
+
+Proper monitoring is essential for maintaining the reliability and performance of the Entertainment Data Platform. This guide covers key metrics, monitoring strategies, and log locations across all platform components.
+
+## Key Metrics to Monitor
+
+### System Health Metrics
+
+<CardGroup cols={2}>
+  <Card title="Data Ingestion Rate" icon="arrow-up-right-dots">
+    Monitor the rate of records being ingested from TMDB API into Kafka topics
+  </Card>
+  <Card title="Processing Latency" icon="clock">
+    Track end-to-end latency from ingestion to final storage layer
+  </Card>
+  <Card title="Error Rates" icon="triangle-exclamation">
+    Monitor invalid schema rates and processing failures
+  </Card>
+  <Card title="Resource Utilization" icon="gauge-high">
+    Track CPU, memory, and disk usage across all services
+  </Card>
+</CardGroup>
+
+## Kafka Consumer Lag Monitoring
+
+### Topic Monitoring
+
+Monitor consumer lag for the following Kafka topics:
+
+```yaml
+Topics to Monitor:
+  - tmdb.movies.raw
+  - tmdb.tv_series.raw
+  - tmdb.people.raw
+```
+
+### Checking Consumer Lag
+
+<Tabs>
+  <Tab title="Using Kafka CLI">
+    ```bash
+    # Check consumer group lag
+    kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
+      --group stream-processor-group \
+      --describe
+    
+    # Monitor specific topic
+    kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
+      --group stream-processor-group \
+      --topic tmdb.movies.raw \
+      --describe
+    ```
+  </Tab>
+  <Tab title="Using Monitoring Tools">
+    Configure your Kafka monitoring tool (e.g., Kafka Manager, Confluent Control Center) to track:
+    - Current offset
+    - Log end offset
+    - Lag (difference between log end and current offset)
+    - Consumer group state
+  </Tab>
+</Tabs>
+
+<Warning>
+  **High Consumer Lag Alert**: If consumer lag exceeds 10,000 messages, investigate streaming job performance and resource allocation.
+</Warning>
+
+### Critical Kafka Metrics
+
+| Metric | Description | Alert Threshold |
+|--------|-------------|----------------|
+| Consumer Lag | Messages pending processing | > 10,000 |
+| Offset Commit Rate | How often offsets are committed | < 1/min |
+| Fetch Rate | Messages consumed per second | Drops > 50% |
+| Error Rate | Failed message processing | > 1% |
+
+## Spark Job Monitoring
+
+### Stream Processing Jobs
+
+The platform runs continuous Spark Structured Streaming jobs that process Kafka events:
+
+**Job Name**: `KafkaStreamToDelta` (stream_processor/main.py:41)
+
+<Accordion title="Key Metrics to Track">
+  - **Input Rate**: Records/second from Kafka sources
+  - **Processing Rate**: Records/second being processed
+  - **Batch Duration**: Time to process each micro-batch
+  - **Total Delay**: Scheduling delay + processing time
+  - **Active Queries**: Number of running streaming queries (expected: 6 - valid/invalid for each entity type)
+</Accordion>
+
+### Batch Processing Jobs
+
+Monitor these Spark batch jobs:
+
+1. **Deduplication Job** (`run_dedup_timestamp`)
+   - Removes duplicate records based on timestamp
+   - Runs on Bronze to Silver layer transformation
+   - Location: batch_jobs/pipelines/bronze_silver/minio_to_minio.py:19
+
+2. **ClickHouse Export Job** (`write_to_clickhouse`)
+   - Exports data from Delta Lake to ClickHouse
+   - Location: batch_jobs/pipelines/silver_silver/minio_to_clickhouse.py:80
+
+3. **Neo4j Graph Job** (`write_to_neo4j`)
+   - Builds knowledge graph in Neo4j
+
+4. **Pinecone Vector Job** (`write_to_pinecone`)
+   - Indexes embeddings in Pinecone
+
+### Accessing Spark UI
+
+<Steps>
+  <Step title="Access Local Spark UI">
+    When running locally, access the Spark UI at:
+    ```
+    http://localhost:4040
+    ```
+  </Step>
+  <Step title="Monitor Streaming Queries">
+    Navigate to the **Structured Streaming** tab to view:
+    - Query statistics
+    - Input/processing rates
+    - Batch details
+    - Watermark status
+  </Step>
+  <Step title="Check Job History">
+    View completed jobs in the **Jobs** and **Stages** tabs
+  </Step>
+</Steps>
+
+<Tip>
+  The watermark for streaming queries is set to **10 minutes** (stream_processor/config/config.dev.yml:11). Monitor if late-arriving data is being dropped.
+</Tip>
+
+## Database Health Checks
+
+### MinIO (Delta Lake Storage)
+
+**Endpoint**: http://localhost:9000 (configurable via settings)
+
+<CodeGroup>
+```bash MinIO Health Check
+# Check bucket existence
+mc ls local/deltalake
+
+# Monitor storage usage
+mc admin info local
+
+# Check replication status (if configured)
+mc admin replicate status local
+```
+
+```python Python Health Check
+from stream_processor.runtime.minio_client import MinioClient
+
+minio_client = MinioClient()
+bucket_exists = minio_client.bucket_exists("deltalake")
+print(f"Bucket exists: {bucket_exists}")
+```
+</CodeGroup>
+
+**Key Paths to Monitor**:
+- Bronze Layer Valid: `s3a://deltalake/bronze/valid/{movies,tvseries,people}`
+- Bronze Layer Invalid: `s3a://deltalake/bronze/invalid/{movies,tvseries,people}`
+- Silver Layer Valid: `s3a://deltalake/silver/valid/{movies,tvseries,people}`
+- Checkpoints: `s3a://deltalake/bronze/_checkpoints/`
+
+### ClickHouse
+
+**Connection**: localhost:8123 (HTTP), localhost:9000 (Native)
+
+```sql
+-- Check system health
+SELECT * FROM system.metrics;
+
+-- Monitor query performance
+SELECT query, event_time, query_duration_ms 
+FROM system.query_log 
+WHERE query_duration_ms > 1000 
+ORDER BY event_time DESC 
+LIMIT 10;
+
+-- Check table sizes
+SELECT 
+    table,
+    formatReadableSize(sum(bytes)) as size,
+    sum(rows) as rows
+FROM system.parts
+WHERE active AND database = 'silver_layer'
+GROUP BY table;
+
+-- Verify data freshness
+SELECT 
+    max(updated_at) as last_update,
+    count(*) as total_records
+FROM silver_layer.movies;
+```
+
+### Redis (Batch Version Tracking)
+
+**Connection**: localhost:6379
+
+```bash
+# Connect to Redis
+redis-cli
+
+# Check batch versions
+GET dedup_batch_version_movie
+GET dedup_batch_version_tv_series
+GET dedup_batch_version_person
+
+# Monitor memory usage
+INFO memory
+
+# Check connection count
+INFO clients
+```
+
+<Warning>
+  If Redis loses batch version data, the pipeline will fail. Ensure regular Redis backups are configured.
+</Warning>
+
+### Neo4j
+
+Monitor graph database health and query performance:
+
+```cypher
+// Check node and relationship counts
+MATCH (n) RETURN labels(n) as type, count(*) as count;
+MATCH ()-[r]->() RETURN type(r) as relationship, count(*) as count;
+
+// Monitor query performance
+CALL dbms.listQueries();
+
+// Check database size
+CALL db.stats.retrieve('GRAPH COUNTS');
+```
+
+## Airflow DAG Monitoring
+
+<Note>
+  The Airflow DAG implementation is currently commented out in the codebase (batch_jobs/dags/batch_jobs.py). When enabled, monitor the following:
+</Note>
+
+### Planned DAG: `full_batch_jobs`
+
+**Schedule**: Every 10 minutes (`*/10 * * * *`)
+
+**Task Sequence**:
+1. `job_dedup_timestamp` - Deduplicate records
+2. `job_extract_to_clickhouse` - Export to ClickHouse
+3. `job_write_to_neo4j` - Build knowledge graph
+4. `job_write_to_pinecone` - Index vectors
+
+### Key Airflow Metrics
+
+| Metric | Description | Action Threshold |
+|--------|-------------|------------------|
+| Task Success Rate | % of successful task runs | < 95% |
+| DAG Run Duration | Total time for full pipeline | > 15 minutes |
+| Task Queue Length | Tasks waiting to execute | > 10 |
+| Scheduler Heartbeat | Last scheduler activity | > 1 minute ago |
+
+## Log Locations and Formats
+
+### Logging Configuration
+
+All services use centralized logging configuration (common/logging_config.py:5):
+
+```python
+Format: "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+Output: stdout
+Default Level: INFO (configurable via LOG_LEVEL env var)
+```
+
+### Log Levels
+
+Set the `LOG_LEVEL` environment variable:
+
+<Tabs>
+  <Tab title="Development">
+    ```bash
+    export LOG_LEVEL=DEBUG
+    ```
+    Use for detailed troubleshooting and development
+  </Tab>
+  <Tab title="Production">
+    ```bash
+    export LOG_LEVEL=INFO
+    ```
+    Standard production logging
+  </Tab>
+  <Tab title="Critical Only">
+    ```bash
+    export LOG_LEVEL=ERROR
+    ```
+    Minimal logging for high-performance scenarios
+  </Tab>
+</Tabs>
+
+### Component-Specific Logs
+
+<AccordionGroup>
+  <Accordion title="Stream Processor Logs">
+    **Component**: Stream processor (Kafka to Delta Lake)
+    
+    **Location**: stdout/stderr or configured log aggregation
+    
+    **Key Log Messages**:
+    - `"Loading configuration..."` - Service startup
+    - `"Spark session started"` - Spark initialization
+    - `"Creating stream logic for topic: {topic}"` - Stream setup
+    - `"Batch {batch_id} count={count}"` - Micro-batch processing
+    
+    **Source**: stream_processor/main.py:18, stream_processor/sinks/delta_lake_sink.py:17
+  </Accordion>
+  
+  <Accordion title="Batch Job Logs">
+    **Component**: Batch processing jobs
+    
+    **Key Log Messages**:
+    - `"Loading configuration..."` - Job initialization
+    - `"Last version for {key} found in Redis: {version}"` - Batch version tracking
+    - `"Reading data from {path} with version {start} to {end}"` - Data loading
+    - `"Upserting data from {source} to {target}"` - Data transformation
+    - `"CRITICAL: Last version for {key} NOT found in Redis"` - Critical error
+    
+    **Source**: batch_jobs/pipelines/bronze_silver/minio_to_minio.py:17-69
+  </Accordion>
+  
+  <Accordion title="Ingestion Service Logs">
+    **Component**: Data ingestion from TMDB API
+    
+    **Key Log Messages**:
+    - `"Loading config with env={env}"` - Configuration loading
+    - `"Config file not found: {path}"` - Configuration errors
+    - Producer retry and buffer warnings
+  </Accordion>
+  
+  <Accordion title="ClickHouse Writer Logs">
+    **Component**: ClickHouse data export
+    
+    **Key Log Messages**:
+    - `"Start writing to Clickhouse table: {database}.{table}"` - Write start
+    - `"Finish writing to Clickhouse table: {database}.{table}"` - Write success
+    - `"Error when write to Clickhouse table: {database}.{table}"` - Write failure
+    
+    **Source**: batch_jobs/io/writers/clickhouse_jdbc_writer.py:29-43
+  </Accordion>
+</AccordionGroup>
+
+### Log Aggregation
+
+<Tip>
+  For production deployments, consider aggregating logs using:
+  - **ELK Stack** (Elasticsearch, Logstash, Kibana)
+  - **Loki** with Grafana
+  - **CloudWatch** (for AWS deployments)
+  - **Datadog** or **Splunk** for enterprise monitoring
+</Tip>
+
+### Sample Log Analysis Queries
+
+```bash
+# Find all errors in last hour
+grep "ERROR" app.log | grep "$(date -d '1 hour ago' '+%Y-%m-%d %H'):"
+
+# Count processing batches
+grep "Batch.*count=" stream_processor.log | wc -l
+
+# Find configuration loading issues
+grep "Config file not found" *.log
+
+# Monitor Redis version tracking
+grep "Last version.*found in Redis" batch_jobs.log
+```
+
+## Monitoring Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Set Up Alerts" icon="bell">
+    Configure alerts for:
+    - High consumer lag (> 10,000 messages)
+    - Streaming query failures
+    - Batch job failures
+    - Database connection errors
+    - Disk space < 20%
+  </Card>
+  
+  <Card title="Regular Health Checks" icon="stethoscope">
+    Implement automated health checks:
+    - Kafka broker availability
+    - Spark streaming query status
+    - Database connectivity
+    - Storage system health
+  </Card>
+  
+  <Card title="Performance Baselines" icon="chart-line">
+    Establish baseline metrics:
+    - Normal processing latency
+    - Expected throughput rates
+    - Typical resource usage
+    - Average batch duration
+  </Card>
+  
+  <Card title="Data Quality Monitoring" icon="magnifying-glass-chart">
+    Track data quality metrics:
+    - Valid vs invalid schema ratio
+    - Duplicate record rates
+    - Data freshness (time since last update)
+    - Record completeness
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Troubleshooting" icon="wrench" href="/operations/troubleshooting">
+    Learn how to diagnose and resolve common issues
+  </Card>
+  <Card title="Performance Tuning" icon="gauge-high" href="/operations/performance-tuning">
+    Optimize your platform for better performance
+  </Card>
+</CardGroup>

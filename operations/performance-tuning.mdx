@@ -1,0 +1,770 @@
+---
+title: Performance Tuning
+description: Optimize the Entertainment Data Platform for better performance and resource efficiency
+---
+
+## Overview
+
+This guide provides recommendations for tuning the Entertainment Data Platform to achieve optimal performance. Follow these guidelines based on your workload characteristics and resource constraints.
+
+## Spark Tuning Parameters
+
+### Stream Processing Optimization
+
+The streaming application (`KafkaStreamToDelta`) can be optimized with the following Spark configurations:
+
+<CodeGroup>
+```python Recommended Settings
+builder = (
+    SparkSession.builder
+    .appName("KafkaStreamToDelta")
+    .master("local[*]")
+    
+    # Memory Configuration
+    .config("spark.driver.memory", "4g")
+    .config("spark.executor.memory", "4g")
+    .config("spark.memory.fraction", "0.8")
+    .config("spark.memory.storageFraction", "0.3")
+    
+    # Parallelism
+    .config("spark.sql.shuffle.partitions", "200")  # Adjust based on data volume
+    .config("spark.default.parallelism", "100")
+    
+    # Streaming-specific
+    .config("spark.sql.streaming.minBatchesToRetain", "10")
+    .config("spark.sql.streaming.maxBatchesToRetainInMemory", "5")
+    
+    # Delta Lake optimization
+    .config("spark.databricks.delta.optimizeWrite.enabled", "true")
+    .config("spark.databricks.delta.autoCompact.enabled", "true")
+    .config("spark.databricks.delta.properties.defaults.enableChangeDataFeed", "true")
+)
+```
+
+```python Production Settings (High Volume)
+builder = (
+    SparkSession.builder
+    .appName("KafkaStreamToDelta")
+    .master("yarn")  # or "k8s://https://kubernetes.default.svc"
+    
+    # Increased resources for production
+    .config("spark.driver.memory", "8g")
+    .config("spark.executor.memory", "8g")
+    .config("spark.executor.cores", "4")
+    .config("spark.executor.instances", "5")
+    
+    # Optimized for high throughput
+    .config("spark.sql.shuffle.partitions", "400")
+    .config("spark.streaming.kafka.maxRatePerPartition", "10000")
+    .config("spark.sql.streaming.schemaInference", "false")
+    
+    # Checkpoint optimization
+    .config("spark.sql.streaming.checkpointLocation.minBatchesToRetain", "5")
+)
+```
+</CodeGroup>
+
+### Key Spark Parameters Explained
+
+<AccordionGroup>
+  <Accordion title="Memory Configuration">
+    **spark.driver.memory** / **spark.executor.memory**
+    - Default: 1g (too low for production)
+    - Recommended: 4-8g depending on data volume
+    - Rule of thumb: 1-2GB per 10GB of data processed per batch
+    
+    **spark.memory.fraction**
+    - Default: 0.6
+    - Recommended: 0.8 for data-intensive workloads
+    - Controls memory available for execution and storage
+    
+    **spark.memory.storageFraction**
+    - Default: 0.5
+    - Recommended: 0.3 for streaming (favor execution over caching)
+  </Accordion>
+  
+  <Accordion title="Parallelism Configuration">
+    **spark.sql.shuffle.partitions**
+    - Default: 200
+    - Recommended: 2-3x number of executor cores
+    - For local mode: 50-100
+    - For cluster mode: 200-400
+    
+    **spark.default.parallelism**
+    - Default: Number of cores
+    - Recommended: 2x number of available cores
+    - Affects operations like groupBy, reduceByKey
+    
+    **spark.streaming.kafka.maxRatePerPartition**
+    - Limits records consumed per partition per trigger
+    - Prevents overwhelming the system
+    - Start with 1000, increase gradually to 10000+
+  </Accordion>
+  
+  <Accordion title="Delta Lake Optimization">
+    **spark.databricks.delta.optimizeWrite.enabled**
+    - Automatically optimizes file sizes during writes
+    - Reduces small file problem
+    - Recommended: true for production
+    
+    **spark.databricks.delta.autoCompact.enabled**
+    - Automatically compacts small files
+    - Improves read performance
+    - Trade-off: Slightly slower writes
+    
+    **enableChangeDataFeed**
+    - Required for CDC (Change Data Capture)
+    - Already enabled in base configuration (stream_processor/main.py:49)
+    - Essential for deduplication pipeline
+  </Accordion>
+</AccordionGroup>
+
+### Batch Job Optimization
+
+Optimize batch processing jobs with these configurations:
+
+```python
+# For Bronze to Silver (Deduplication)
+builder = (
+    create_spark_minio(app_name="run_dedup_timestamp", settings=settings)
+    .config("spark.sql.adaptive.enabled", "true")
+    .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+    .config("spark.sql.adaptive.skewJoin.enabled", "true")
+    .config("spark.sql.files.maxPartitionBytes", "128MB")
+    .config("spark.sql.files.minPartitionNum", "10")
+)
+
+# For Silver to Gold (ClickHouse/Neo4j/Pinecone)
+builder = (
+    create_spark_minio_clickhouse(app_name="write_to_clickhouse", settings=settings)
+    .config("spark.sql.adaptive.enabled", "true")
+    .config("spark.sql.autoBroadcastJoinThreshold", "50MB")
+    .config("spark.network.timeout", "600s")
+    .config("spark.executor.heartbeatInterval", "60s")
+)
+```
+
+<Tip>
+  **Adaptive Query Execution (AQE)** is a game-changer for batch jobs. Enable it with:
+  ```python
+  .config("spark.sql.adaptive.enabled", "true")
+  ```
+  AQE dynamically optimizes query execution based on runtime statistics.
+</Tip>
+
+## Kafka Configuration Optimization
+
+### Producer Configuration (Ingestion Service)
+
+Optimize Kafka producer settings in `ingestion/config/config.dev.yml`:
+
+```yaml
+kafka:
+  producer:
+    retries: 3  # Default, increase to 5 for unreliable networks
+    max_buffer: 33554432  # 32MB, increase to 67108864 (64MB) for high throughput
+    
+    # Additional recommended settings (add to settings.py)
+    batch_size: 16384  # Increase to 32768 or 65536 for better throughput
+    linger_ms: 10  # Wait up to 10ms to batch messages
+    compression_type: "snappy"  # or "lz4" for better compression
+    acks: "all"  # Ensure data durability
+    max_in_flight_requests_per_connection: 5
+```
+
+### Consumer Configuration (Stream Processor)
+
+Optimize Kafka consumer for streaming (stream_processor/sources/kafka_source.py):
+
+```python
+def read_kafka_stream(spark: SparkSession, settings: Settings, topic: str) -> DataFrame:
+    return (
+        spark.readStream
+        .format("kafka")
+        .option("kafka.bootstrap.servers", settings.sources.kafka.server.bootstrap_servers)
+        .option("subscribe", topic)
+        .option("startingOffsets", "latest")
+        
+        # Performance optimizations
+        .option("kafka.max.partition.fetch.bytes", "10485760")  # 10MB
+        .option("kafka.fetch.max.bytes", "52428800")  # 50MB
+        .option("kafka.fetch.min.bytes", "1048576")  # 1MB
+        .option("kafka.fetch.wait.max.ms", "500")
+        
+        # Reliability
+        .option("kafka.isolation.level", "read_committed")
+        .option("failOnDataLoss", "false")  # Set to true for strict guarantees
+        
+        .load()
+    )
+```
+
+### Kafka Broker Tuning
+
+<Warning>
+  These settings require broker-level access and restart.
+</Warning>
+
+```properties
+# server.properties
+
+# Increase retention for reliability
+log.retention.hours=168  # 7 days
+log.retention.bytes=1073741824  # 1GB per partition
+
+# Optimize for throughput
+num.network.threads=8
+num.io.threads=16
+num.replica.fetchers=4
+
+# Increase buffer sizes
+socket.send.buffer.bytes=1048576
+socket.receive.buffer.bytes=1048576
+socket.request.max.bytes=104857600
+
+# Compression
+compression.type=snappy
+
+# Replication
+default.replication.factor=3
+min.insync.replicas=2
+```
+
+## Database Query Optimization
+
+### ClickHouse Optimization
+
+#### Table Design
+
+Optimize ClickHouse table schemas for query performance:
+
+```sql
+-- Optimized table with proper ORDER BY and partitioning
+CREATE TABLE silver_layer.movies_optimized
+(
+    id UInt32,
+    title String,
+    release_date Date,
+    popularity Float32,
+    vote_average Float32,
+    updated_at DateTime,
+    -- ... other columns
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMM(release_date)
+ORDER BY (release_date, id)
+SETTINGS index_granularity = 8192;
+
+-- Add indexes for frequently filtered columns
+ALTER TABLE silver_layer.movies_optimized 
+ADD INDEX idx_title title TYPE tokenbf_v1(32768, 3, 0) GRANULARITY 4;
+
+ALTER TABLE silver_layer.movies_optimized 
+ADD INDEX idx_popularity popularity TYPE minmax GRANULARITY 4;
+```
+
+#### Query Optimization
+
+<CodeGroup>
+```sql Optimized Queries
+-- Use PREWHERE instead of WHERE for filtering
+SELECT title, vote_average
+FROM silver_layer.movies
+PREWHERE release_date >= '2020-01-01'
+WHERE popularity > 50
+ORDER BY vote_average DESC
+LIMIT 100;
+
+-- Use appropriate aggregation functions
+SELECT 
+    toYYYYMM(release_date) as month,
+    uniqExact(id) as unique_movies,  -- Use uniq() for approximate
+    avg(vote_average) as avg_rating
+FROM silver_layer.movies
+GROUP BY month
+ORDER BY month;
+
+-- Materialize frequently used aggregations
+CREATE MATERIALIZED VIEW silver_layer.movie_stats_by_year
+ENGINE = SummingMergeTree()
+ORDER BY release_year
+AS SELECT
+    toYear(release_date) as release_year,
+    count() as movie_count,
+    avg(vote_average) as avg_rating
+FROM silver_layer.movies
+GROUP BY release_year;
+```
+
+```sql Avoid These Patterns
+-- DON'T: Use SELECT * on large tables
+SELECT * FROM silver_layer.movies;  -- BAD
+
+-- DO: Select only needed columns
+SELECT id, title, release_date FROM silver_layer.movies;  -- GOOD
+
+-- DON'T: Use WHERE on non-indexed columns for large scans
+SELECT * FROM silver_layer.movies WHERE overview LIKE '%action%';  -- SLOW
+
+-- DO: Use full-text search indexes or limit the scan
+SELECT * FROM silver_layer.movies 
+WHERE hasToken(overview, 'action') 
+AND release_date >= '2020-01-01'  -- Reduce scan range
+LIMIT 1000;
+```
+</CodeGroup>
+
+#### Write Optimization
+
+Optimize writes from Spark (batch_jobs/io/writers/clickhouse_jdbc_writer.py):
+
+```python
+class ClickHouseJdbcWriter:
+    def write_table(self, df: DataFrame, table_name: str, mode: str = "append"):
+        # Optimize DataFrame before writing
+        df = df.repartition(10)  # Adjust based on data volume
+        df = df.coalesce(5)  # Reduce to fewer partitions for writing
+        
+        df.write \
+            .format("jdbc") \
+            .option("driver", self.driver) \
+            .option("url", self.url) \
+            .option("user", self.username) \
+            .option("password", self.password) \
+            .option("isolationLevel", "NONE") \
+            .option("dbtable", table_name) \
+            .option("batchsize", "10000")  # Increase batch size
+            .option("rewriteBatchedStatements", "true") \
+            .mode(mode) \
+            .save()
+```
+
+### Neo4j Optimization
+
+#### Batch Size Tuning
+
+Adjust Neo4j batch size in configuration (batch_jobs/config/config.dev.yml:51):
+
+```yaml
+neo4j:
+  batch_size: 10  # Default
+  # Tune based on:
+  # - Network latency: Lower for high latency (5-10)
+  # - Data complexity: Lower for complex relationships (10-50)
+  # - Memory: Higher for more memory (100-500)
+  # - Optimal range: 50-200 for most use cases
+```
+
+#### Connection Pooling
+
+```python
+# Implement connection pooling in Neo4j writer
+from neo4j import GraphDatabase
+
+class Neo4jWriter:
+    def __init__(self, uri, username, password):
+        self.driver = GraphDatabase.driver(
+            uri, 
+            auth=(username, password),
+            max_connection_lifetime=3600,  # 1 hour
+            max_connection_pool_size=50,
+            connection_acquisition_timeout=60
+        )
+    
+    def write_batch(self, records, batch_size=100):
+        with self.driver.session() as session:
+            for i in range(0, len(records), batch_size):
+                batch = records[i:i+batch_size]
+                session.write_transaction(self._create_nodes, batch)
+```
+
+#### Index Creation
+
+```cypher
+-- Create indexes for frequently queried properties
+CREATE INDEX movie_title_idx FOR (m:Movie) ON (m.title);
+CREATE INDEX person_name_idx FOR (p:Person) ON (p.name);
+CREATE INDEX movie_release_idx FOR (m:Movie) ON (m.release_date);
+
+-- Create constraints for uniqueness
+CREATE CONSTRAINT movie_id_unique FOR (m:Movie) REQUIRE m.id IS UNIQUE;
+CREATE CONSTRAINT person_id_unique FOR (p:Person) REQUIRE p.id IS UNIQUE;
+
+-- Use composite indexes for common query patterns
+CREATE INDEX movie_composite_idx FOR (m:Movie) ON (m.release_date, m.popularity);
+```
+
+### Delta Lake Optimization
+
+#### Optimize and Z-Order
+
+Regularly optimize Delta Lake tables to improve read performance:
+
+```python
+from delta.tables import DeltaTable
+
+# Optimize with Z-ordering
+delta_table = DeltaTable.forPath(spark, "s3a://deltalake/silver/valid/movies")
+
+# Compact small files
+delta_table.optimize().executeCompaction()
+
+# Z-order by frequently filtered columns
+delta_table.optimize().executeZOrderBy("release_date", "popularity")
+
+# Vacuum old files (removes files older than retention period)
+delta_table.vacuum(168)  # 7 days retention
+```
+
+<Warning>
+  Run OPTIMIZE during low-traffic periods as it's resource-intensive.
+</Warning>
+
+#### Partition Strategy
+
+```python
+# Write with partitioning for better query performance
+df.write \
+    .format("delta") \
+    .partitionBy("data_type", "year", "month") \
+    .mode("append") \
+    .save("s3a://deltalake/silver/valid/movies")
+
+# Query with partition pruning
+filtered_df = spark.read \
+    .format("delta") \
+    .load("s3a://deltalake/silver/valid/movies") \
+    .where("data_type = 'movie' AND year = 2024 AND month = 1")
+```
+
+## Batch Size Tuning
+
+### Streaming Batch Size
+
+Control micro-batch size in streaming queries:
+
+```python
+# Option 1: Limit processing rate
+df.writeStream \
+    .format("delta") \
+    .option("checkpointLocation", checkpoint_path) \
+    .trigger(processingTime="30 seconds") \  # Process every 30 seconds
+    .start(table_path)
+
+# Option 2: Limit records per trigger
+df.writeStream \
+    .format("delta") \
+    .option("checkpointLocation", checkpoint_path) \
+    .option("maxFilesPerTrigger", "10") \  # Process max 10 files per trigger
+    .start(table_path)
+
+# Option 3: Control Kafka consumption rate
+.option("maxOffsetsPerTrigger", "10000")  # Max 10k records per trigger
+```
+
+### Write Batch Size
+
+<Tabs>
+  <Tab title="ClickHouse">
+    ```python
+    # JDBC batch size
+    .option("batchsize", "10000")  # Default: 1000
+    
+    # Optimal range:
+    # - Small records (<1KB): 10,000-50,000
+    # - Medium records (1-10KB): 1,000-10,000  
+    # - Large records (>10KB): 100-1,000
+    ```
+  </Tab>
+  <Tab title="Neo4j">
+    ```yaml
+    # In config.dev.yml
+    neo4j:
+      batch_size: 100  # Default: 10
+    
+    # Optimal range:
+    # - Simple nodes: 100-500
+    # - Complex relationships: 50-100
+    # - Network latency > 50ms: 10-50
+    ```
+  </Tab>
+  <Tab title="Pinecone">
+    ```python
+    # Vector upsert batch size
+    batch_size = 100  # Default
+    
+    # Optimal range:
+    # - Dimension < 512: 100-200
+    # - Dimension 512-1536: 50-100
+    # - Dimension > 1536: 20-50
+    ```
+  </Tab>
+</Tabs>
+
+## Memory and Resource Allocation
+
+### Container Resource Limits
+
+<CodeGroup>
+```yaml Docker Compose
+services:
+  stream-processor:
+    image: entertainment-platform/stream-processor
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          cpus: '2'
+          memory: 4G
+    environment:
+      - SPARK_DRIVER_MEMORY=4g
+      - SPARK_EXECUTOR_MEMORY=4g
+  
+  batch-jobs:
+    image: entertainment-platform/batch-jobs
+    deploy:
+      resources:
+        limits:
+          cpus: '8'
+          memory: 16G
+        reservations:
+          cpus: '4'
+          memory: 8G
+```
+
+```yaml Kubernetes
+apiVersion: v1
+kind: Pod
+metadata:
+  name: stream-processor
+spec:
+  containers:
+  - name: spark-streaming
+    image: entertainment-platform/stream-processor
+    resources:
+      requests:
+        memory: "4Gi"
+        cpu: "2"
+      limits:
+        memory: "8Gi"
+        cpu: "4"
+    env:
+    - name: SPARK_DRIVER_MEMORY
+      value: "4g"
+    - name: SPARK_EXECUTOR_MEMORY
+      value: "4g"
+```
+</CodeGroup>
+
+### JVM Tuning
+
+```bash
+# Set JVM options for Spark driver and executors
+export SPARK_DRIVER_JAVA_OPTS="
+  -XX:+UseG1GC 
+  -XX:InitiatingHeapOccupancyPercent=35 
+  -XX:MaxGCPauseMillis=200 
+  -XX:+PrintGCDetails 
+  -XX:+PrintGCTimeStamps
+"
+
+export SPARK_EXECUTOR_JAVA_OPTS="
+  -XX:+UseG1GC 
+  -XX:InitiatingHeapOccupancyPercent=35 
+  -XX:MaxGCPauseMillis=200
+"
+
+# For applications with large heap (>8GB), consider:
+# -XX:+UseG1GC -XX:G1HeapRegionSize=32m
+```
+
+### Redis Memory Optimization
+
+```bash
+# redis.conf
+maxmemory 2gb
+maxmemory-policy allkeys-lru  # Evict least recently used keys
+
+# Optimize for small datasets (batch version tracking)
+save ""  # Disable RDB snapshots if using AOF
+appendonly yes
+appendfsync everysec
+```
+
+## Benchmarking Recommendations
+
+### Baseline Metrics
+
+Establish baseline performance metrics:
+
+<Steps>
+  <Step title="Measure Current Performance">
+    ```python
+    import time
+    from pyspark.sql import SparkSession
+    
+    start_time = time.time()
+    
+    # Run your pipeline
+    run_dedup_timestamp()
+    
+    duration = time.time() - start_time
+    print(f"Pipeline duration: {duration:.2f} seconds")
+    
+    # Record:
+    # - Records processed
+    # - Duration
+    # - Resource usage (CPU, memory)
+    # - Error rate
+    ```
+  </Step>
+  
+  <Step title="Apply Optimization">
+    Implement one optimization at a time
+  </Step>
+  
+  <Step title="Re-measure Performance">
+    Run the same workload and compare metrics
+  </Step>
+  
+  <Step title="Document Results">
+    Keep a log of changes and their impact:
+    ```
+    Date: 2024-01-15
+    Change: Increased spark.sql.shuffle.partitions from 200 to 400
+    Result: 25% faster processing, same memory usage
+    ```
+  </Step>
+</Steps>
+
+### Load Testing
+
+<CodeGroup>
+```python Streaming Load Test
+# Generate test data
+from kafka import KafkaProducer
+import json
+import time
+
+producer = KafkaProducer(
+    bootstrap_servers='localhost:9092',
+    value_serializer=lambda v: json.dumps(v).encode('utf-8')
+)
+
+# Send messages at different rates
+for rate in [100, 500, 1000, 5000, 10000]:
+    print(f"Testing at {rate} msgs/sec")
+    
+    for i in range(rate * 60):  # 1 minute test
+        message = {
+            "movie_id": i,
+            "data_type": "movie",
+            "data_label": "metadata",
+            "timestamp": int(time.time() * 1000)
+        }
+        producer.send('tmdb.movies.raw', message)
+        time.sleep(1.0 / rate)
+    
+    # Monitor consumer lag and processing time
+    time.sleep(60)
+```
+
+```python Batch Load Test
+# Test with different data volumes
+from delta import DeltaTable
+
+for num_records in [1000, 10000, 100000, 1000000]:
+    print(f"Testing with {num_records} records")
+    
+    # Create test data
+    test_df = spark.range(num_records).selectExpr(
+        "id as movie_id",
+        "'movie' as data_type",
+        "current_timestamp() as timestamp"
+    )
+    
+    start_time = time.time()
+    
+    # Run transformation
+    run_dedup_timestamp()
+    
+    duration = time.time() - start_time
+    records_per_sec = num_records / duration
+    
+    print(f"Duration: {duration:.2f}s")
+    print(f"Throughput: {records_per_sec:.0f} records/sec")
+```
+</CodeGroup>
+
+### Performance Monitoring During Tests
+
+```bash
+# Monitor system resources
+htop
+
+# Monitor Spark
+open http://localhost:4040
+
+# Monitor Kafka
+kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
+  --group stream-processor-group --describe
+
+# Monitor MinIO
+mc admin prometheus metrics local
+
+# Monitor ClickHouse
+echo "SELECT * FROM system.metrics" | \
+  curl 'http://localhost:8123/' --data-binary @-
+```
+
+## Performance Checklist
+
+<Steps>
+  <Step title="Spark Configuration">
+    - [ ] Driver and executor memory sized appropriately (4-8GB)
+    - [ ] Shuffle partitions optimized (200-400)
+    - [ ] Delta Lake auto-optimize enabled
+    - [ ] Adaptive query execution enabled for batch jobs
+  </Step>
+  
+  <Step title="Kafka Configuration">
+    - [ ] Producer batch size increased (32KB-64KB)
+    - [ ] Consumer fetch size optimized (10MB)
+    - [ ] Compression enabled (snappy or lz4)
+    - [ ] Max rate per partition configured
+  </Step>
+  
+  <Step title="Database Optimization">
+    - [ ] ClickHouse tables have proper ORDER BY
+    - [ ] Indexes created for filtered columns
+    - [ ] Write batch sizes optimized (10k for ClickHouse)
+    - [ ] Neo4j batch size tuned (50-200)
+  </Step>
+  
+  <Step title="Resource Allocation">
+    - [ ] Container limits set appropriately
+    - [ ] JVM garbage collector configured (G1GC)
+    - [ ] Redis max memory set
+    - [ ] Sufficient disk space for Delta Lake
+  </Step>
+  
+  <Step title="Monitoring">
+    - [ ] Baseline metrics established
+    - [ ] Load testing completed
+    - [ ] Alerts configured for degradation
+    - [ ] Performance documentation maintained
+  </Step>
+</Steps>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Monitor Performance" icon="chart-line" href="/operations/monitoring">
+    Set up monitoring to track optimization results
+  </Card>
+  <Card title="Troubleshoot Issues" icon="wrench" href="/operations/troubleshooting">
+    Resolve performance bottlenecks and issues
+  </Card>
+</CardGroup>

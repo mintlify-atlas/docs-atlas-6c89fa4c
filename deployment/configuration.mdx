@@ -1,0 +1,507 @@
+---
+title: 'Configuration'
+description: 'Configure the Entertainment Data Platform for different environments'
+icon: 'gear'
+---
+
+## Overview
+
+The Entertainment Data Platform uses environment-specific YAML configuration files and environment variables to control behavior across development, staging, and production environments.
+
+## Configuration Structure
+
+Configuration files are located in each service's `config/` directory:
+
+```
+src/
+├── ingestion/config/
+│   ├── config.dev.yml
+│   └── config.prod.yml
+├── stream_processor/config/
+│   ├── config.dev.yml
+│   └── config.prod.yml
+└── batch_jobs/config/
+    ├── config.dev.yml
+    └── config.prod.yml
+```
+
+## Environment Selection
+
+The active configuration is controlled by the `APP_ENV` environment variable:
+
+<CodeGroup>
+```bash Development
+export APP_ENV=dev
+```
+
+```bash Production
+export APP_ENV=prod
+```
+</CodeGroup>
+
+<Note>
+  In Kubernetes deployments, `APP_ENV=prod` is set in the deployment manifests.
+</Note>
+
+## Ingestion Service Configuration
+
+The ingestion service fetches data from TMDB API and produces to Kafka.
+
+### Development Configuration
+
+<CodeGroup>
+```yaml config.dev.yml
+kafka:
+  topics:
+    movie: tmdb.movies.raw
+    tv_series: tmdb.tv_series.raw
+    person: tmdb.people.raw
+  server:
+    bootstrap_servers: localhost:9092
+  producer:
+    retries: 3
+    max_buffer: 10
+```
+</CodeGroup>
+
+### Production Configuration
+
+<CodeGroup>
+```yaml config.prod.yml
+kafka:
+  topics:
+    movie: tmdb.movies.raw
+    tv_series: tmdb.tv_series.raw
+    person: tmdb.people.raw
+  server:
+    bootstrap_servers: kafka-internal:9092
+  producer:
+    retries: 3
+    max_buffer: 10
+```
+</CodeGroup>
+
+### Key Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|--------|
+| `kafka.server.bootstrap_servers` | Kafka broker connection string | `localhost:9092` (dev)<br/>`kafka-internal:9092` (prod) |
+| `kafka.topics.movie` | Topic for movie data | `tmdb.movies.raw` |
+| `kafka.topics.tv_series` | Topic for TV series data | `tmdb.tv_series.raw` |
+| `kafka.topics.person` | Topic for person data | `tmdb.people.raw` |
+| `kafka.producer.retries` | Number of retry attempts | `3` |
+| `kafka.producer.max_buffer` | Maximum message buffer size | `10` |
+
+## Stream Processor Configuration
+
+The stream processor consumes from Kafka, processes with Spark, and writes to Delta Lake on MinIO.
+
+### Development Configuration
+
+<CodeGroup>
+```yaml config.dev.yml
+sources:
+  kafka:
+    topics:
+      movie: tmdb.movies.raw
+      tv_series: tmdb.tv_series.raw
+      person: tmdb.people.raw
+    server:
+      bootstrap_servers: localhost:9092
+
+stream:
+  watermark: "10 minutes"
+
+sinks:
+  delta_lake:
+    minio_endpoint: "http://localhost:9000"
+    minio_endpoint_sdk: "localhost:9000"
+    minio_access_key: "minio"
+    minio_secret_key: "minio123"
+    core_bucket: "deltalake"
+    target_name_folder:
+      movie: "movies"
+      tv_series: "tvseries"
+      person: "people"
+    tables:
+      valid_base_path: "s3a://deltalake/bronze/valid"
+      invalid_base_path: "s3a://deltalake/bronze/invalid"
+    checkpoints:
+      valid_base_path: "s3a://deltalake/bronze/_checkpoints/_valid"
+      invalid_base_path: "s3a://deltalake/bronze/_checkpoints/_invalid"
+```
+</CodeGroup>
+
+### Production Configuration
+
+<CodeGroup>
+```yaml config.prod.yml
+sources:
+  kafka:
+    topics:
+      movie: tmdb.movies.raw
+      tv_series: tmdb.tv_series.raw
+      person: tmdb.people.raw
+    server:
+      bootstrap_servers: kafka-internal:9092
+
+stream:
+  watermark: "10 minutes"
+
+sinks:
+  delta_lake:
+    minio_endpoint: "http://minio-internal:9000"
+    minio_endpoint_sdk: "minio-internal:9000"
+    minio_access_key: "minio"
+    minio_secret_key: "minio123"
+    core_bucket: "deltalake"
+    target_name_folder:
+      movie: "movies"
+      tv_series: "tvseries"
+      person: "people"
+    tables:
+      valid_base_path: "s3a://deltalake/bronze/valid"
+      invalid_base_path: "s3a://deltalake/bronze/invalid"
+    checkpoints:
+      valid_base_path: "s3a://deltalake/bronze/_checkpoints/_valid"
+      invalid_base_path: "s3a://deltalake/bronze/_checkpoints/_invalid"
+```
+</CodeGroup>
+
+### Key Parameters
+
+<AccordionGroup>
+  <Accordion title="Kafka Source Configuration">
+    | Parameter | Description | Value |
+    |-----------|-------------|-------|
+    | `sources.kafka.server.bootstrap_servers` | Kafka broker address | `localhost:9092` (dev)<br/>`kafka-internal:9092` (prod) |
+    | `sources.kafka.topics.*` | Topic names to consume from | `tmdb.movies.raw`, etc. |
+  </Accordion>
+
+  <Accordion title="Streaming Configuration">
+    | Parameter | Description | Value |
+    |-----------|-------------|-------|
+    | `stream.watermark` | Late data watermark for windowing | `10 minutes` |
+    
+    <Note>
+      Watermark controls how long to wait for late-arriving events. Events older than 10 minutes are dropped.
+    </Note>
+  </Accordion>
+
+  <Accordion title="Delta Lake Sink Configuration">
+    | Parameter | Description |
+    |-----------|-------------|
+    | `sinks.delta_lake.minio_endpoint` | MinIO HTTP endpoint for S3 operations |
+    | `sinks.delta_lake.minio_endpoint_sdk` | MinIO SDK endpoint (without protocol) |
+    | `sinks.delta_lake.minio_access_key` | MinIO access key |
+    | `sinks.delta_lake.minio_secret_key` | MinIO secret key |
+    | `sinks.delta_lake.core_bucket` | S3 bucket name for Delta Lake |
+    | `sinks.delta_lake.target_name_folder` | Folder structure within bucket |
+    | `sinks.delta_lake.tables.valid_base_path` | Base path for valid records |
+    | `sinks.delta_lake.tables.invalid_base_path` | Base path for invalid records |
+    | `sinks.delta_lake.checkpoints.valid_base_path` | Checkpoint location for valid stream |
+    | `sinks.delta_lake.checkpoints.invalid_base_path` | Checkpoint location for invalid stream |
+  </Accordion>
+</AccordionGroup>
+
+## Database Connection Settings
+
+### Kafka
+
+<Tabs>
+  <Tab title="Docker Compose">
+    ```yaml
+    bootstrap_servers: localhost:9092
+    ```
+    
+    Access from host machine using localhost.
+  </Tab>
+  <Tab title="Kubernetes">
+    ```yaml
+    bootstrap_servers: kafka-internal:9092
+    ```
+    
+    Access via internal ClusterIP service.
+  </Tab>
+  <Tab title="Docker Network">
+    ```yaml
+    bootstrap_servers: broker1:29092
+    ```
+    
+    Access from within Docker Compose network using internal listener.
+  </Tab>
+</Tabs>
+
+### MinIO (S3)
+
+<Tabs>
+  <Tab title="Docker Compose">
+    ```yaml
+    minio_endpoint: "http://localhost:9000"
+    minio_endpoint_sdk: "localhost:9000"
+    minio_access_key: "minio"
+    minio_secret_key: "minio123"
+    ```
+  </Tab>
+  <Tab title="Kubernetes">
+    ```yaml
+    minio_endpoint: "http://minio-internal:9000"
+    minio_endpoint_sdk: "minio-internal:9000"
+    minio_access_key: "minio"
+    minio_secret_key: "minio123"
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+  Default credentials (`minio`/`minio123`) are for development only. Use strong credentials and secrets management for production.
+</Warning>
+
+### ClickHouse
+
+<Tabs>
+  <Tab title="Docker Compose">
+    ```yaml
+    host: localhost
+    http_port: 8123
+    native_port: 9002
+    ```
+  </Tab>
+  <Tab title="Kubernetes">
+    ```yaml
+    host: clickhouse-internal
+    http_port: 8123
+    native_port: 9000
+    ```
+  </Tab>
+</Tabs>
+
+### Redis
+
+<Tabs>
+  <Tab title="Docker Compose">
+    ```yaml
+    host: localhost
+    port: 6379
+    ```
+  </Tab>
+  <Tab title="Kubernetes">
+    ```yaml
+    host: redis-internal
+    port: 6379
+    ```
+  </Tab>
+</Tabs>
+
+## Environment Variables
+
+### Required Variables
+
+| Variable | Description | Example |
+|----------|-------------|--------|
+| `APP_ENV` | Environment selector | `dev`, `prod` |
+| `TMDB_API_KEY` | TMDB API authentication key | `your-api-key-here` |
+
+### Optional Variables
+
+| Variable | Description | Default |
+|----------|-------------|--------|
+| `LOG_LEVEL` | Logging verbosity | `INFO` |
+| `SPARK_EXECUTOR_MEMORY` | Memory per Spark executor | `2g` |
+| `SPARK_DRIVER_MEMORY` | Memory for Spark driver | `1g` |
+
+### Setting Environment Variables
+
+<Tabs>
+  <Tab title="Local Development">
+    ```bash
+    export APP_ENV=dev
+    export TMDB_API_KEY=your-api-key
+    export LOG_LEVEL=DEBUG
+    ```
+  </Tab>
+  <Tab title="Docker Compose">
+    ```yaml
+    services:
+      ingestion:
+        environment:
+          - APP_ENV=prod
+          - TMDB_API_KEY=${TMDB_API_KEY}
+          - LOG_LEVEL=INFO
+    ```
+  </Tab>
+  <Tab title="Kubernetes">
+    ```yaml
+    apiVersion: v1
+    kind: Secret
+    metadata:
+      name: app-secrets
+      namespace: data-platform
+    type: Opaque
+    stringData:
+      tmdb-api-key: "your-api-key"
+    ---
+    # In deployment
+    env:
+      - name: APP_ENV
+        value: "prod"
+      - name: TMDB_API_KEY
+        valueFrom:
+          secretKeyRef:
+            name: app-secrets
+            key: tmdb-api-key
+    ```
+  </Tab>
+</Tabs>
+
+## Performance Tuning
+
+### Kafka Producer Settings
+
+Optimize throughput and reliability:
+
+```yaml
+kafka:
+  producer:
+    retries: 3                    # Retry failed sends
+    max_buffer: 10                # Buffer up to 10 messages
+    batch_size: 16384            # Batch size in bytes
+    linger_ms: 10                # Wait up to 10ms to batch messages
+    compression_type: "snappy"   # Compress messages
+    acks: "all"                  # Wait for all replicas
+```
+
+### Spark Streaming Settings
+
+Tune for your workload:
+
+```yaml
+stream:
+  watermark: "10 minutes"        # Late data tolerance
+  trigger_interval: "30 seconds" # Micro-batch interval
+  max_offsets_per_trigger: 1000  # Max records per batch
+  shuffle_partitions: 6          # Parallelism for shuffles
+```
+
+### Delta Lake Optimization
+
+```yaml
+sinks:
+  delta_lake:
+    # Optimize file size for reads
+    target_file_size: "128MB"
+    
+    # Compact small files
+    auto_optimize: true
+    
+    # Z-order for query performance
+    z_order_columns:
+      - "release_date"
+      - "genre"
+```
+
+### Memory Tuning
+
+<Tabs>
+  <Tab title="Development">
+    ```bash
+    export SPARK_EXECUTOR_MEMORY=2g
+    export SPARK_DRIVER_MEMORY=1g
+    export SPARK_EXECUTOR_CORES=2
+    ```
+  </Tab>
+  <Tab title="Production (Kubernetes)">
+    ```yaml
+    resources:
+      requests:
+        memory: "4Gi"
+        cpu: "2"
+      limits:
+        memory: "8Gi"
+        cpu: "4"
+    ```
+  </Tab>
+</Tabs>
+
+## Configuration Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use Secrets Management" icon="key">
+    Never commit credentials to version control. Use Kubernetes Secrets, AWS Secrets Manager, or HashiCorp Vault.
+  </Card>
+  <Card title="Environment Parity" icon="clone">
+    Keep dev and prod configurations as similar as possible, differing only in connection strings and credentials.
+  </Card>
+  <Card title="Validation" icon="check">
+    Validate configuration at startup. Fail fast if required parameters are missing.
+  </Card>
+  <Card title="Documentation" icon="book">
+    Document all configuration parameters and their effects on system behavior.
+  </Card>
+</CardGroup>
+
+## Troubleshooting Configuration Issues
+
+<AccordionGroup>
+  <Accordion title="Configuration file not found">
+    **Symptom**: Application fails to start with "config file not found" error
+    
+    **Solution**:
+    1. Verify `APP_ENV` matches a config file: `config.{APP_ENV}.yml`
+    2. Check the config directory is in the application path
+    3. Verify file permissions (must be readable)
+  </Accordion>
+
+  <Accordion title="Cannot connect to Kafka">
+    **Symptom**: Connection timeout or refused
+    
+    **Solution**:
+    1. Verify `bootstrap_servers` matches your deployment:
+       - Docker Compose: `localhost:9092`
+       - Kubernetes: `kafka-internal:9092`
+       - From Docker network: `broker1:29092`
+    2. Check Kafka is running and healthy
+    3. Verify network connectivity
+  </Accordion>
+
+  <Accordion title="MinIO access denied">
+    **Symptom**: S3 operations fail with 403 Forbidden
+    
+    **Solution**:
+    1. Verify credentials match MinIO configuration
+    2. Check bucket exists (create `deltalake` bucket)
+    3. Verify MinIO endpoint URLs are correct
+    4. For HTTPS, ensure SSL certificates are valid
+  </Accordion>
+
+  <Accordion title="Spark out of memory">
+    **Symptom**: Executor or driver OOM errors
+    
+    **Solution**:
+    1. Increase memory limits:
+       ```yaml
+       resources:
+         limits:
+           memory: "8Gi"
+       ```
+    2. Reduce batch size:
+       ```yaml
+       max_offsets_per_trigger: 500
+       ```
+    3. Increase parallelism:
+       ```yaml
+       shuffle_partitions: 12
+       ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Docker Deployment" icon="docker" href="/deployment/docker">
+    Deploy locally with Docker Compose
+  </Card>
+  <Card title="Kubernetes Deployment" icon="dharmachakra" href="/deployment/kubernetes">
+    Deploy to production with Kubernetes
+  </Card>
+</CardGroup>

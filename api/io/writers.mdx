@@ -1,0 +1,695 @@
+---
+title: 'Writers'
+description: 'Data sink writers for ClickHouse, Delta Lake, Neo4j, and Pinecone'
+icon: 'pen-to-square'
+---
+
+The writers module provides classes for writing data to various storage systems in the Entertainment Data Platform.
+
+## ClickHouseJDBCWriter
+
+Writes data to ClickHouse using JDBC connector for broad compatibility.
+
+### Class Definition
+
+```python
+from pyspark.sql import SparkSession
+from batch_jobs.io.writers import ClickHouseJDBCWriter
+
+writer = ClickHouseJDBCWriter(spark: SparkSession)
+```
+
+<ParamField path="spark" type="SparkSession" required>
+  Active SparkSession instance for writing data
+</ParamField>
+
+### Configuration
+
+Automatically loads connection settings from application configuration:
+
+<ParamField path="storage.clickhouse.jdbc_driver" type="str">
+  JDBC driver class (e.g., `com.clickhouse.jdbc.ClickHouseDriver`)
+</ParamField>
+
+<ParamField path="storage.clickhouse.host" type="str">
+  ClickHouse server hostname
+</ParamField>
+
+<ParamField path="storage.clickhouse.port" type="int">
+  ClickHouse HTTP port (typically 8123)
+</ParamField>
+
+<ParamField path="storage.clickhouse.database" type="str">
+  Target database name
+</ParamField>
+
+<ParamField path="storage.clickhouse.username" type="str">
+  Authentication username
+</ParamField>
+
+<ParamField path="storage.clickhouse.password" type="str">
+  Authentication password
+</ParamField>
+
+### Methods
+
+#### write_table
+
+Writes a DataFrame to ClickHouse table using JDBC.
+
+```python
+writer.write_table(
+    df: DataFrame,
+    table_name: str,
+    mode: str = "append"
+)
+```
+
+<ParamField path="df" type="DataFrame" required>
+  PySpark DataFrame to write
+</ParamField>
+
+<ParamField path="table_name" type="str" required>
+  Target table name in ClickHouse
+</ParamField>
+
+<ParamField path="mode" type="str" default="append">
+  Write mode: `append`, `overwrite`, `ignore`, or `error`
+</ParamField>
+
+**Example:**
+
+```python
+from pyspark.sql import SparkSession
+from batch_jobs.io.writers import ClickHouseJDBCWriter
+
+spark = SparkSession.builder.getOrCreate()
+writer = ClickHouseJDBCWriter(spark)
+
+# Create sample data
+data = [
+    (1, "The Matrix", 1999, "sci-fi"),
+    (2, "Inception", 2010, "thriller")
+]
+df = spark.createDataFrame(data, ["id", "title", "year", "genre"])
+
+# Write to ClickHouse
+writer.write_table(df, "movies", mode="append")
+```
+
+<Info>
+  The JDBC writer uses `isolationLevel=NONE` for optimal performance with ClickHouse's eventual consistency model.
+</Info>
+
+---
+
+## ClickHouseNativeWriter
+
+Writes data to ClickHouse using the native Spark connector for better performance.
+
+### Class Definition
+
+```python
+from pyspark.sql import SparkSession
+from batch_jobs.io.writers import ClickHouseNativeWriter
+
+writer = ClickHouseNativeWriter(spark: SparkSession)
+```
+
+<ParamField path="spark" type="SparkSession" required>
+  SparkSession configured with ClickHouse catalog
+</ParamField>
+
+### Methods
+
+#### write_table
+
+Writes DataFrame to ClickHouse using native connector.
+
+```python
+writer.write_table(
+    df: DataFrame,
+    table_name: str
+)
+```
+
+<ParamField path="df" type="DataFrame" required>
+  PySpark DataFrame to write
+</ParamField>
+
+<ParamField path="table_name" type="str" required>
+  Target table name
+</ParamField>
+
+**Example:**
+
+```python
+from batch_jobs.io.writers import ClickHouseNativeWriter
+
+writer = ClickHouseNativeWriter(spark)
+
+# Write analytics data
+analytics_df = spark.read.parquet("s3a://bucket/analytics")
+writer.write_table(analytics_df, "user_analytics")
+```
+
+<Note>
+  The native writer uses `writeTo().append()` which requires the ClickHouse catalog to be registered in Spark.
+</Note>
+
+---
+
+## DeltaMinioWriter
+
+Writes data to Delta Lake tables stored in MinIO object storage.
+
+### Class Definition
+
+```python
+from pyspark.sql import SparkSession
+from batch_jobs.io.writers import DeltaMinioWriter
+
+writer = DeltaMinioWriter(spark: SparkSession)
+```
+
+<ParamField path="spark" type="SparkSession" required>
+  SparkSession with Delta Lake support enabled
+</ParamField>
+
+### Methods
+
+#### overwrite
+
+Writes DataFrame to Delta table, replacing existing data.
+
+```python
+writer.overwrite(
+    df: DataFrame,
+    target_path: str
+)
+```
+
+<ParamField path="df" type="DataFrame" required>
+  DataFrame to write
+</ParamField>
+
+<ParamField path="target_path" type="str" required>
+  S3 path to Delta table (e.g., `s3a://bucket/path/to/table`)
+</ParamField>
+
+**Example:**
+
+```python
+from batch_jobs.io.writers import DeltaMinioWriter
+
+writer = DeltaMinioWriter(spark)
+
+# Full refresh of dimension table
+dim_df = spark.read.parquet("s3a://staging/dimensions/content")
+writer.overwrite(dim_df, "s3a://data-lake/dimensions/content")
+```
+
+#### append
+
+Appends DataFrame to existing Delta table.
+
+```python
+writer.append(
+    df: DataFrame,
+    target_path: str
+)
+```
+
+<ParamField path="df" type="DataFrame" required>
+  DataFrame to append
+</ParamField>
+
+<ParamField path="target_path" type="str" required>
+  S3 path to Delta table
+</ParamField>
+
+**Example:**
+
+```python
+# Incremental load of fact table
+fact_df = spark.read.parquet("s3a://staging/facts/views_20240315")
+writer.append(fact_df, "s3a://data-lake/facts/content_views")
+```
+
+#### write_first_with_cdf
+
+Creates a new Delta table with Change Data Feed enabled.
+
+```python
+writer.write_first_with_cdf(
+    df: DataFrame,
+    target_path: str
+)
+```
+
+<ParamField path="df" type="DataFrame" required>
+  Initial DataFrame to write
+</ParamField>
+
+<ParamField path="target_path" type="str" required>
+  S3 path for new Delta table
+</ParamField>
+
+**Example:**
+
+```python
+# Initialize table with CDF for change tracking
+initial_df = spark.read.parquet("s3a://raw/content")
+writer.write_first_with_cdf(initial_df, "s3a://data-lake/content")
+```
+
+<Warning>
+  `write_first_with_cdf` uses overwrite mode. Only use this method when initializing a new table.
+</Warning>
+
+---
+
+## Neo4jWriter
+
+Writes graph data (nodes and relationships) to Neo4j graph database.
+
+### Class Definition
+
+```python
+from pyspark.sql import SparkSession
+from batch_jobs.io.writers import Neo4jWriter
+
+writer = Neo4jWriter(spark: SparkSession)
+```
+
+<ParamField path="spark" type="SparkSession" required>
+  SparkSession with Neo4j connector configured
+</ParamField>
+
+### Configuration
+
+<ParamField path="storage.neo4j.batch_size" type="int">
+  Number of records to write per batch (default configured in settings)
+</ParamField>
+
+### Methods
+
+#### write_node_constraint
+
+Writes nodes with strict KEY constraint enforcement.
+
+```python
+writer.write_node_constraint(
+    df: DataFrame,
+    label: str,
+    keys: list[str]
+)
+```
+
+<ParamField path="df" type="DataFrame" required>
+  DataFrame containing node data
+</ParamField>
+
+<ParamField path="label" type="str" required>
+  Node label in Neo4j
+</ParamField>
+
+<ParamField path="keys" type="list[str]" required>
+  List of property names that form the unique key
+</ParamField>
+
+**Example:**
+
+```python
+from batch_jobs.io.writers import Neo4jWriter
+
+writer = Neo4jWriter(spark)
+
+# Write content nodes with strict constraints
+content_df = spark.createDataFrame([
+    ("movie_001", "The Matrix", 1999),
+    ("movie_002", "Inception", 2010)
+], ["content_id", "title", "year"])
+
+writer.write_node_constraint(
+    df=content_df,
+    label="Content",
+    keys=["content_id"]
+)
+```
+
+<Info>
+  Strict mode (`schema.optimization.node.keys=KEY`) ensures exact matching and throws errors on constraint violations.
+</Info>
+
+#### write_node_normal
+
+Writes nodes with relaxed UNIQUE constraint enforcement.
+
+```python
+writer.write_node_normal(
+    df: DataFrame,
+    label: str,
+    keys: list[str]
+)
+```
+
+<ParamField path="df" type="DataFrame" required>
+  DataFrame containing node data
+</ParamField>
+
+<ParamField path="label" type="str" required>
+  Node label in Neo4j
+</ParamField>
+
+<ParamField path="keys" type="list[str]" required>
+  List of property names that should be unique
+</ParamField>
+
+**Example:**
+
+```python
+# Write actor nodes with unique constraints
+actor_df = spark.createDataFrame([
+    ("actor_123", "Keanu Reeves", None),
+    ("actor_456", "Leonardo DiCaprio", "1974-11-11")
+], ["actor_id", "name", "birth_date"])
+
+writer.write_node_normal(
+    df=actor_df,
+    label="Actor",
+    keys=["actor_id"]
+)
+```
+
+<Note>
+  Normal mode skips null values in keys (`node.keys.skip.nulls=true`) and uses UNIQUE optimization instead of KEY.
+</Note>
+
+#### write_relationship
+
+Writes relationships between existing nodes.
+
+```python
+writer.write_relationship(
+    df: DataFrame,
+    repartition_cols: list[str],
+    relationship: str,
+    source_label: str,
+    source_keys: list[str],
+    source_properties: list[str],
+    target_label: str,
+    target_keys: list[str],
+    target_properties: list[str],
+    relationship_properties: list[str],
+    partition_num: int = 1,
+    action_col: str = "added"
+)
+```
+
+<ParamField path="df" type="DataFrame" required>
+  DataFrame containing relationship data
+</ParamField>
+
+<ParamField path="repartition_cols" type="list[str]" required>
+  Columns to use for data repartitioning
+</ParamField>
+
+<ParamField path="relationship" type="str" required>
+  Relationship type name
+</ParamField>
+
+<ParamField path="source_label" type="str" required>
+  Label of source nodes
+</ParamField>
+
+<ParamField path="source_keys" type="list[str]" required>
+  Properties identifying source nodes
+</ParamField>
+
+<ParamField path="source_properties" type="list[str]" required>
+  Additional properties for source nodes
+</ParamField>
+
+<ParamField path="target_label" type="str" required>
+  Label of target nodes
+</ParamField>
+
+<ParamField path="target_keys" type="list[str]" required>
+  Properties identifying target nodes
+</ParamField>
+
+<ParamField path="target_properties" type="list[str]" required>
+  Additional properties for target nodes
+</ParamField>
+
+<ParamField path="relationship_properties" type="list[str]" required>
+  Properties to store on the relationship
+</ParamField>
+
+<ParamField path="partition_num" type="int" default="1">
+  Number of partitions for parallel processing
+</ParamField>
+
+<ParamField path="action_col" type="str" default="added">
+  Action type: `added` or `removed` (sets is_deleted flag)
+</ParamField>
+
+**Example:**
+
+<Tabs>
+  <Tab title="Basic Relationship">
+    ```python
+    # Create ACTED_IN relationships
+    acting_df = spark.createDataFrame([
+        ("actor_123", "movie_001", "Neo", 1999),
+        ("actor_456", "movie_002", "Cobb", 2010)
+    ], ["actor_id", "content_id", "character_name", "year"])
+
+    writer.write_relationship(
+        df=acting_df,
+        repartition_cols=["actor_id"],
+        relationship="ACTED_IN",
+        source_label="Actor",
+        source_keys=["actor_id"],
+        source_properties=[],
+        target_label="Content",
+        target_keys=["content_id"],
+        target_properties=[],
+        relationship_properties=["character_name", "year"],
+        partition_num=4,
+        action_col="added"
+    )
+    ```
+  </Tab>
+  <Tab title="Removing Relationships">
+    ```python
+    # Mark relationships as deleted
+    removed_df = spark.createDataFrame([
+        ("actor_123", "movie_001")
+    ], ["actor_id", "content_id"])
+
+    writer.write_relationship(
+        df=removed_df,
+        repartition_cols=["actor_id"],
+        relationship="ACTED_IN",
+        source_label="Actor",
+        source_keys=["actor_id"],
+        source_properties=[],
+        target_label="Content",
+        target_keys=["content_id"],
+        target_properties=[],
+        relationship_properties=[],
+        action_col="removed"  # Sets is_deleted=true
+    )
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+  The `write_relationship` method automatically adds an `is_deleted` flag to relationship properties based on the `action_col` parameter.
+</Warning>
+
+---
+
+## PineconeWriter
+
+Writes vector embeddings to Pinecone vector database for similarity search.
+
+### Class Definition
+
+```python
+from pyspark.sql import SparkSession
+from batch_jobs.io.writers import PineconeWriter
+
+writer = PineconeWriter(spark: SparkSession)
+```
+
+<ParamField path="spark" type="SparkSession" required>
+  SparkSession with Pinecone connector configured
+</ParamField>
+
+### Configuration
+
+<ParamField path="storage.pinecone.api_key" type="str">
+  Pinecone API key for authentication
+</ParamField>
+
+<ParamField path="storage.pinecone.index_name" type="str">
+  Target Pinecone index name
+</ParamField>
+
+### Methods
+
+#### write_index
+
+Writes DataFrame containing vector embeddings to Pinecone index.
+
+```python
+writer.write_index(df: DataFrame)
+```
+
+<ParamField path="df" type="DataFrame" required>
+  DataFrame with vector embeddings. Must contain `id` and `values` columns at minimum.
+</ParamField>
+
+**Example:**
+
+```python
+from batch_jobs.io.writers import PineconeWriter
+from pyspark.sql.types import *
+
+writer = PineconeWriter(spark)
+
+# Create embeddings DataFrame
+schema = StructType([
+    StructField("id", StringType(), False),
+    StructField("values", ArrayType(FloatType()), False),
+    StructField("metadata", MapType(StringType(), StringType()), True)
+])
+
+data = [
+    ("movie_001", [0.1, 0.2, 0.3, ...], {"title": "The Matrix", "year": "1999"}),
+    ("movie_002", [0.4, 0.5, 0.6, ...], {"title": "Inception", "year": "2010"})
+]
+
+embeddings_df = spark.createDataFrame(data, schema)
+
+# Write to Pinecone
+writer.write_index(embeddings_df)
+```
+
+<Info>
+  The DataFrame must conform to Pinecone's expected schema:
+  - `id`: Unique identifier (string)
+  - `values`: Vector embedding (array of floats)
+  - `metadata`: Optional key-value pairs (map)
+</Info>
+
+---
+
+## Usage Patterns
+
+### Multi-Sink Write Pipeline
+
+```python
+from pyspark.sql import SparkSession
+from batch_jobs.io.writers import (
+    DeltaMinioWriter,
+    ClickHouseNativeWriter,
+    Neo4jWriter
+)
+
+spark = SparkSession.builder.getOrCreate()
+
+# Process data
+processed_df = spark.read.parquet("s3a://staging/processed")
+
+# Write to Delta Lake (data lake)
+delta_writer = DeltaMinioWriter(spark)
+delta_writer.append(processed_df, "s3a://data-lake/content")
+
+# Write to ClickHouse (analytics)
+ch_writer = ClickHouseNativeWriter(spark)
+ch_writer.write_table(processed_df, "content_facts")
+
+# Write to Neo4j (graph relationships)
+neo4j_writer = Neo4jWriter(spark)
+neo4j_writer.write_node_normal(
+    df=processed_df.select("content_id", "title", "year"),
+    label="Content",
+    keys=["content_id"]
+)
+```
+
+### Incremental Graph Updates
+
+```python
+from batch_jobs.io.readers import DeltaMinioReader
+from batch_jobs.io.writers import Neo4jWriter
+
+# Read changes from Delta Lake
+reader = DeltaMinioReader(spark)
+changes = reader.read_table_cdf(
+    target_path="s3a://data-lake/relationships",
+    start_timestamp="2024-03-01T00:00:00Z"
+)
+
+# Split into added and removed
+added = changes.filter(changes._change_type == "insert")
+removed = changes.filter(changes._change_type == "delete")
+
+# Write to Neo4j
+writer = Neo4jWriter(spark)
+
+# Add new relationships
+if not added.isEmpty():
+    writer.write_relationship(
+        df=added,
+        repartition_cols=["source_id"],
+        relationship="RELATED_TO",
+        source_label="Content",
+        source_keys=["source_id"],
+        source_properties=[],
+        target_label="Content",
+        target_keys=["target_id"],
+        target_properties=[],
+        relationship_properties=["relationship_type", "score"],
+        action_col="added"
+    )
+
+# Mark removed relationships
+if not removed.isEmpty():
+    writer.write_relationship(
+        df=removed,
+        repartition_cols=["source_id"],
+        relationship="RELATED_TO",
+        source_label="Content",
+        source_keys=["source_id"],
+        source_properties=[],
+        target_label="Content",
+        target_keys=["target_id"],
+        target_properties=[],
+        relationship_properties=[],
+        action_col="removed"
+    )
+```
+
+### Error Handling
+
+```python
+import logging
+from batch_jobs.io.writers import ClickHouseJDBCWriter
+
+logger = logging.getLogger(__name__)
+writer = ClickHouseJDBCWriter(spark)
+
+try:
+    writer.write_table(df, "target_table", mode="append")
+    logger.info("Successfully wrote %d records", df.count())
+except Exception as e:
+    logger.error(f"Failed to write to ClickHouse: {e}")
+    # Implement retry logic or write to dead letter queue
+    df.write.parquet("s3a://failed/clickhouse_write_20240315")
+    raise
+```
