@@ -1,0 +1,101 @@
+{
+  "projectType": "data-platform",
+  "projectName": "Entertainment Data Platform",
+  "projectDescription": "A distributed data platform that ingests, processes, and organizes Movies, TV Series, and People data to enable interactive search, analytics, and RAG applications.",
+  "theme": "aspen",
+  "primaryColor": "#94cb04",
+  "lightColor": "#545454",
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "architecture"
+            ]
+          },
+          {
+            "group": "Core Components",
+            "pages": [
+              "components/collector",
+              "components/ingestion",
+              "components/stream-processor",
+              "components/batch-jobs"
+            ]
+          },
+          {
+            "group": "Data Model",
+            "pages": [
+              "data-model/overview",
+              "data-model/medallion-architecture",
+              "data-model/schemas"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/docker",
+              "deployment/kubernetes",
+              "deployment/configuration"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/monitoring",
+              "operations/troubleshooting",
+              "operations/performance-tuning"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Pipelines",
+            "pages": [
+              "api/pipelines/bronze-to-silver",
+              "api/pipelines/silver-to-clickhouse",
+              "api/pipelines/clickhouse-to-neo4j",
+              "api/pipelines/clickhouse-to-pinecone"
+            ]
+          },
+          {
+            "group": "IO Components",
+            "pages": [
+              "api/io/readers",
+              "api/io/writers"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "High-throughput stream processing with Kafka and Spark",
+    "Medallion architecture (Bronze → Silver → Gold) with Delta Lake",
+    "Multi-database serving layer (ClickHouse, Neo4j, Pinecone)",
+    "Intelligent change detection and optimized sync",
+    "Fault-tolerant ingestion with Dead Letter Queue (DLQ)",
+    "Production-ready deployment with Docker and Kubernetes"
+  ],
+  "publicApiSurface": [
+    "batch_jobs.pipelines.bronze_silver.minio_to_minio",
+    "batch_jobs.pipelines.silver_silver.minio_to_clickhouse",
+    "batch_jobs.pipelines.silver_gold.clickhouse_to_neo4j",
+    "batch_jobs.pipelines.silver_gold.clickhouse_to_pinecone",
+    "stream_processor.main",
+    "ingestion.main",
+    "batch_jobs.io.readers.DeltaMinioReader",
+    "batch_jobs.io.readers.ClickHouseReader",
+    "batch_jobs.io.writers.ClickHouseJDBCWriter",
+    "batch_jobs.io.writers.Neo4jWriter",
+    "batch_jobs.io.writers.PineconeWriter"
+  ]
+}
